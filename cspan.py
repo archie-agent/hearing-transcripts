@@ -125,13 +125,28 @@ def discover_cspan(committees: dict, days: int = 7,
                 page.wait_for_timeout(7000)
                 pages_loaded += 1
 
-                # WAF detection: explicit captcha
+                # WAF detection: explicit captcha — retry once with cooldown
                 body_text = (page.inner_text("body") or "")[:300]
                 if "confirm you are human" in body_text.lower():
-                    log.warning("C-SPAN WAF captcha at page %d (%s), aborting "
-                                "(collected %d hearings)", pages_loaded, key,
-                                len(all_results))
-                    break
+                    log.warning("C-SPAN WAF captcha at page %d (%s), "
+                                "retrying with 60s cooldown...", pages_loaded, key)
+                    context.close()
+                    browser.close()
+                    _time.sleep(60)
+                    browser = p.chromium.launch(headless=True)
+                    context = browser.new_context(user_agent=_UA)
+                    page = context.new_page()
+                    pages_loaded = 0
+                    _rate_limit()
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(7000)
+                    pages_loaded += 1
+                    body_text = (page.inner_text("body") or "")[:300]
+                    if "confirm you are human" in body_text.lower():
+                        log.warning("C-SPAN WAF still active after cooldown, "
+                                    "aborting (collected %d hearings)",
+                                    len(all_results))
+                        break
 
                 # Parse results
                 raw_links = page.query_selector_all("a[href*='/program/']")
