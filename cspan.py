@@ -1,7 +1,7 @@
 """C-SPAN caption discovery and extraction for congressional hearings.
 
 Discovers hearing videos via C-SPAN search (using sponsorid per committee),
-Google site-search, and extracts broadcast-quality closed captions via the
+DuckDuckGo site-search, and extracts broadcast-quality closed captions via the
 transcript JSON API.
 """
 
@@ -12,7 +12,6 @@ import logging
 import re
 import time as _time
 from datetime import datetime, timedelta
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -436,15 +435,10 @@ def _parse_search_results(page, cutoff: datetime) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Google-based C-SPAN URL lookup (zero WAF cost)
+# DuckDuckGo-based C-SPAN URL lookup (zero WAF cost)
 # ---------------------------------------------------------------------------
 
-_GOOGLE_DELAY = 2.0  # seconds between Google searches
-_GOOGLE_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
+_DDG_DELAY = 2.5  # seconds between DDG searches (be polite)
 
 _STOPWORDS = {
     "the", "a", "an", "of", "in", "on", "to", "for", "and", "or",
@@ -453,6 +447,7 @@ _STOPWORDS = {
     "subcommittee", "full", "oversight", "examine", "examining",
     "regarding", "concerning", "review", "united", "states", "senate",
     "house", "congress", "testifies", "testimony", "witnesses",
+    "hearings", "focusing",
 }
 
 
@@ -463,36 +458,18 @@ def _extract_search_keywords(title: str, max_words: int = 5) -> str:
     return " ".join(significant[:max_words])
 
 
-class _GoogleResultParser(HTMLParser):
-    """Minimal parser to extract URLs from Google search result HTML."""
-
-    def __init__(self):
-        super().__init__()
-        self.urls: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag != "a":
-            return
-        for name, value in attrs:
-            if name == "href" and value:
-                # Google wraps results in /url?q=<actual_url>&...
-                if value.startswith("/url?"):
-                    m = re.search(r"[?&]q=(https?://[^&]+)", value)
-                    if m:
-                        self.urls.append(m.group(1))
-                elif value.startswith("https://www.c-span.org/"):
-                    self.urls.append(value)
-
-
 def discover_cspan_google(
     hearings: list[dict],
     max_searches: int = 20,
 ) -> list[dict]:
-    """Find C-SPAN URLs via Google site search. No WAF cost.
+    """Find C-SPAN URLs via DuckDuckGo HTML search. No WAF cost.
+
+    Uses DDG's HTML endpoint which returns real results without JS.
+    Query format: ``c-span.org/program {keywords} {year}``
 
     Args:
         hearings: [{id, title, date, committee_key}, ...]
-        max_searches: cap on Google queries per run
+        max_searches: cap on DDG queries per run
 
     Returns:
         [{hearing_id, cspan_url, program_id}, ...]
@@ -505,77 +482,91 @@ def discover_cspan_google(
 
     for h in hearings:
         if searches >= max_searches:
-            log.info("Google C-SPAN: hit search cap (%d)", max_searches)
+            log.info("DDG C-SPAN: hit search cap (%d)", max_searches)
             break
 
         keywords = _extract_search_keywords(h["title"])
         if not keywords:
             continue
 
-        # Add date context for better matching
+        # Add year context for relevance
         date_str = h.get("date", "")
-        date_words = ""
+        year = ""
         if date_str:
             try:
-                dt = datetime.strptime(date_str, "%Y-%m-%d")
-                date_words = dt.strftime("%B %Y")  # e.g. "February 2026"
+                year = datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y")
             except ValueError:
                 pass
 
-        query = f"site:c-span.org {keywords}"
-        if date_words:
-            query += f" {date_words}"
+        query = f"c-span.org/program {keywords}"
+        if year:
+            query += f" {year}"
 
-        search_url = f"https://www.google.com/search?q={quote_plus(query)}&num=5"
-
-        _time.sleep(_GOOGLE_DELAY)
+        _time.sleep(_DDG_DELAY)
         searches += 1
 
         try:
-            resp = httpx.get(
-                search_url,
-                headers={"User-Agent": _GOOGLE_UA},
+            resp = httpx.post(
+                "https://html.duckduckgo.com/html/",
+                data={"q": query},
+                headers={"User-Agent": _UA},
                 follow_redirects=True,
                 timeout=15.0,
             )
+            if resp.status_code == 202:
+                # DDG returns 202 when rate-limited; back off and retry once
+                log.debug("DDG rate-limited (202), backing off 5s...")
+                _time.sleep(5)
+                resp = httpx.post(
+                    "https://html.duckduckgo.com/html/",
+                    data={"q": query},
+                    headers={"User-Agent": _UA},
+                    follow_redirects=True,
+                    timeout=15.0,
+                )
             if resp.status_code != 200:
-                log.debug("Google search returned %d for '%s'", resp.status_code, keywords[:40])
+                log.debug("DDG search returned %d for '%s'",
+                          resp.status_code, keywords[:40])
                 continue
 
-            # Parse HTML for C-SPAN URLs
-            parser = _GoogleResultParser()
-            parser.feed(resp.text)
-
-            # Find first /program/ or /event/ URL
+            # Extract C-SPAN program/event URLs from DDG HTML results
+            raw_urls = re.findall(
+                r"https?://www\.c-span\.org/(?:program|event)/[^\s\"'<>&]+",
+                resp.text,
+            )
+            # Decode HTML entities and deduplicate
+            seen: set[str] = set()
             cspan_url = None
             program_id = None
-            for url in parser.urls:
-                if "c-span.org" not in url:
-                    continue
+            for raw in raw_urls:
+                url = raw.replace("&amp;", "&")
                 m = re.search(r"/(?:program|event)/[^/]+/[^/]+/(\d+)", url)
-                if m:
-                    cspan_url = url
-                    program_id = m.group(1)
-                    break
+                if not m:
+                    continue
+                pid = m.group(1)
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                cspan_url = url
+                program_id = pid
+                break  # take first (most relevant) result
 
             if cspan_url and program_id:
-                # Normalize URL
-                if cspan_url.startswith("//"):
-                    cspan_url = "https:" + cspan_url
                 results.append({
                     "hearing_id": h["id"],
                     "cspan_url": cspan_url,
                     "program_id": program_id,
                 })
-                log.debug("Google C-SPAN: found %s for '%s'", program_id, h["title"][:50])
+                log.debug("DDG C-SPAN: found %s for '%s'",
+                          program_id, h["title"][:50])
             else:
-                log.debug("Google C-SPAN: no match for '%s'", h["title"][:50])
+                log.debug("DDG C-SPAN: no match for '%s'", h["title"][:50])
 
         except Exception as e:
-            log.debug("Google search error for '%s': %s", keywords[:30], e)
+            log.debug("DDG search error for '%s': %s", keywords[:30], e)
             continue
 
-    log.info("Google C-SPAN: %d found from %d searches (%d hearings queried)",
+    log.info("DDG C-SPAN: %d found from %d searches (%d hearings queried)",
              len(results), searches, len(hearings))
     return results
 

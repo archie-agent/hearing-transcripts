@@ -806,11 +806,11 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
     # Attach YouTube clips to matching website hearings
     _attach_youtube_clips(deduped)
 
-    # C-SPAN discovery: 3-step strategy (Google → targeted → rotation)
+    # C-SPAN discovery: 3-step strategy (DDG → targeted → rotation)
     try:
         import cspan
 
-        # Step 1: Google-based C-SPAN lookup (free, zero WAF cost)
+        # Step 1: DuckDuckGo-based C-SPAN lookup (free, zero WAF cost)
         unmatched = [h for h in deduped if "cspan_url" not in h.sources]
         if unmatched:
             google_results = cspan.discover_cspan_google(
