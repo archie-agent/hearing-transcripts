@@ -1001,61 +1001,41 @@ def _attach_cspan_urls(hearings: list[Hearing], cspan_videos: list[dict]) -> Non
     """Match C-SPAN video URLs to hearings by committee + date + title.
 
     Each C-SPAN video has {title, date, url, program_id, committee_key}.
-    - Videos WITH committee_key (from targeted/rotation search):
-      Primary match by committee_key + date, tiebreak by title similarity.
-    - Videos WITHOUT committee_key (from broad search, committee_key=None):
-      Match by date + keyword overlap against ALL hearings.
-    Fallback: date-only match with title similarity for unmatched videos.
+    Primary match: same committee_key + same date.
+    Tiebreaker: keyword overlap (when multiple hearings per committee per day).
+    Fallback: date-only match with keyword overlap for cross-committee matches.
     """
     attached = 0
     for video in cspan_videos:
         video_date = video.get("date", "")
         video_title = video.get("title", "")
         video_url = video.get("url", "")
-        video_committee = video.get("committee_key")  # None for broad results
+        video_committee = video.get("committee_key", "")
         if not video_url or not video_date:
             continue
 
-        if video_committee:
-            # Targeted result: match by committee + date
-            candidates = [
-                h for h in hearings
-                if h.committee_key == video_committee and h.date == video_date
-            ]
-            # Fallback: date-only
-            if not candidates:
-                candidates = [h for h in hearings if h.date == video_date]
-        else:
-            # Broad result (no committee_key): match by date against all hearings
+        # Primary: match by committee + date
+        candidates = [
+            h for h in hearings
+            if h.committee_key == video_committee and h.date == video_date
+        ]
+
+        # Fallback: date-only (cross-committee or joint hearings)
+        if not candidates:
             candidates = [h for h in hearings if h.date == video_date]
 
         if not candidates:
             log.debug("  C-SPAN unmatched: %s %s %s",
-                      video_committee or "broad", video_date, video_title[:40])
+                      video_committee, video_date, video_title[:40])
             continue
 
         if len(candidates) == 1:
             best = candidates[0]
-            # For broad results with single candidate, verify minimum keyword overlap
-            if not video_committee:
-                overlap = _keyword_overlap(best.title, video_title)
-                if overlap < 2:
-                    log.debug("  C-SPAN broad skip (low overlap=%d): %s vs %s",
-                              overlap, video_title[:40], best.title[:40])
-                    continue
         else:
-            # Multiple candidates — use keyword overlap for broad, Jaccard for targeted
-            if not video_committee:
-                scored = [(h, _keyword_overlap(h.title, video_title)) for h in candidates]
-                scored.sort(key=lambda x: x[1], reverse=True)
-                best, best_overlap = scored[0]
-                if best_overlap < 2:
-                    log.debug("  C-SPAN broad skip (low overlap=%d): %s",
-                              best_overlap, video_title[:40])
-                    continue
-            else:
-                best = max(candidates,
-                           key=lambda h: _title_similarity(h.title, video_title))
+            # Multiple candidates — use keyword overlap as tiebreaker
+            scored = [(h, _keyword_overlap(h.title, video_title)) for h in candidates]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            best = scored[0][0]
 
         if "cspan_url" not in best.sources:
             best.sources["cspan_url"] = video_url
