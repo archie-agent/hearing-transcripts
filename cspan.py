@@ -155,6 +155,7 @@ def discover_cspan(committees: dict, days: int = 7,
                 for h in hearings:
                     if h["program_id"] not in seen_ids:
                         seen_ids.add(h["program_id"])
+                        h["committee_key"] = key  # attribute to searched committee
                         all_results.append(h)
                         new += 1
 

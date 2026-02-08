@@ -969,42 +969,49 @@ def _cross_committee_dedup(hearings: list[Hearing]) -> list[Hearing]:
 
 
 def _attach_cspan_urls(hearings: list[Hearing], cspan_videos: list[dict]) -> None:
-    """Match C-SPAN video URLs to hearings by date + title similarity.
+    """Match C-SPAN video URLs to hearings by committee + date + title.
 
-    C-SPAN videos are a flat list of {title, date, url, program_id} from
-    batched searches. We match each video to the best hearing by date first,
-    then title similarity.
+    Each C-SPAN video has {title, date, url, program_id, committee_key}.
+    Primary match: same committee_key + same date.
+    Tiebreaker: title similarity (when multiple hearings per committee per day).
+    Fallback: date-only match with title similarity for unmatched videos.
     """
     attached = 0
     for video in cspan_videos:
         video_date = video.get("date", "")
         video_title = video.get("title", "")
         video_url = video.get("url", "")
+        video_committee = video.get("committee_key", "")
         if not video_url or not video_date:
             continue
 
-        # Find hearings on the same date
-        candidates = [h for h in hearings if h.date == video_date]
+        # Primary: match by committee + date
+        candidates = [
+            h for h in hearings
+            if h.committee_key == video_committee and h.date == video_date
+        ]
+
+        # Fallback: match by date only (for cross-committee or joint hearings)
         if not candidates:
-            log.debug("  C-SPAN unmatched (no date): %s %s", video_date, video_title[:40])
+            candidates = [h for h in hearings if h.date == video_date]
+
+        if not candidates:
+            log.debug("  C-SPAN unmatched: %s %s %s",
+                      video_committee, video_date, video_title[:40])
             continue
 
-        # Score by title similarity
-        scored = [(h, _title_similarity(h.title, video_title)) for h in candidates]
-        scored.sort(key=lambda x: x[1], reverse=True)
-        best, best_sim = scored[0]
-
-        # Require minimum similarity to avoid false matches
-        if best_sim < 0.15:
-            log.debug("  C-SPAN unmatched (low sim %.2f): %s -> %s",
-                      best_sim, video_title[:40], best.title[:40])
-            continue
+        if len(candidates) == 1:
+            best = candidates[0]
+        else:
+            # Multiple candidates — use title similarity as tiebreaker
+            best = max(candidates,
+                       key=lambda h: _title_similarity(h.title, video_title))
 
         if "cspan_url" not in best.sources:
             best.sources["cspan_url"] = video_url
             attached += 1
-            log.debug("  C-SPAN matched (sim=%.2f): %s -> %s",
-                      best_sim, video_title[:40], best.title[:40])
+            log.debug("  C-SPAN matched: %s -> [%s] %s",
+                      video_title[:40], best.committee_key, best.title[:40])
 
     if attached:
         log.info("Attached %d C-SPAN video URLs to hearings", attached)
