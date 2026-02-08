@@ -96,7 +96,9 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
     # 1.5. C-SPAN broadcast captions
     cspan_url = hearing.sources.get("cspan_url")
     if cspan_url:
-        if not state.is_step_done(hearing.id, "cspan"):
+        # Use "cspan_fetched" (transcript actually obtained) not "cspan" (step attempted).
+        # This allows retry if a previous run attempted but found no transcript.
+        if not state.is_step_done(hearing.id, "cspan_fetched"):
             state.mark_step(hearing.id, "cspan", "running")
             try:
                 import cspan
@@ -115,7 +117,7 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
                 state.mark_step(hearing.id, "cspan", "failed", error=str(e))
                 log.error("C-SPAN caption fetch failed for %s: %s", hearing.id, e)
         else:
-            log.info("C-SPAN captions already processed for %s", hearing.id)
+            log.debug("C-SPAN transcript already fetched for %s", hearing.id)
     # (If no cspan_url, leave cspan step unmarked so it can be retried
     # if a URL is discovered on a future run.)
 
