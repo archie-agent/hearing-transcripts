@@ -6,6 +6,8 @@ venv/
 data/audio/
 data/transcripts/
 data/pdfs/
+data/state.db
+data/logs/
 output/
 *.mp3
 *.wav

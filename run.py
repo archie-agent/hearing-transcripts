@@ -27,6 +27,7 @@ load_dotenv()
 import config
 from discover import Hearing, discover_all
 from extract import fetch_govinfo_transcript, process_testimony_pdfs
+from alerts import check_and_alert
 from state import State
 from transcribe import process_hearing_audio
 
@@ -300,6 +301,9 @@ def main():
         log.warning("%d errors:", len(errors))
         for e in errors:
             log.warning("  %s: %s", e["hearing"][:50], e["error"])
+
+    # Alert on persistently failing scrapers
+    check_and_alert(state)
 
 
 if __name__ == "__main__":

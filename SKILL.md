@@ -38,6 +38,6 @@ Set in environment or `.env`:
 - `OPENAI_API_KEY` — for Whisper transcription (optional, captions-only by default)
 - `OPENROUTER_API_KEY` — for LLM cleanup/diarization
 - `GOVINFO_API_KEY` — for official GPO transcripts (uses DEMO_KEY if unset)
-- `CLEANUP_MODEL` — OpenRouter model (default: `google/gemini-2.0-flash-001`)
+- `CLEANUP_MODEL` — OpenRouter model (default: `google/gemini-3-flash-preview`)
 - `TRANSCRIPTION_BACKEND` — `captions-only` (default) or `openai`
 - `MAX_COST_PER_RUN` — cost cap in USD (default: $5.00)

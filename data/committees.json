@@ -270,7 +270,7 @@
       "youtube": "https://www.youtube.com/user/SenFinanceMajority",
       "website": "https://finance.senate.gov",
       "hearings_url": "https://www.finance.senate.gov/hearings",
-      "scraper_type": "drupal_table",
+      "scraper_type": "new_senate_cms",
       "scrapeable": true,
       "requires_js": false,
       "date_format": "MM/DD/YY",
