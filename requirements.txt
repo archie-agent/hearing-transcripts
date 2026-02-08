@@ -3,8 +3,6 @@ openai
 httpx
 pymupdf
 pymupdf4llm
-pdfplumber
 python-dotenv
 beautifulsoup4
 lxml
-assemblyai

@@ -1,0 +1,137 @@
+"""Download and extract text from hearing-related PDFs."""
+
+from __future__ import annotations
+
+import logging
+import re
+from pathlib import Path
+
+import httpx
+
+import config
+
+log = logging.getLogger(__name__)
+
+
+def download_pdf(url: str, output_dir: Path, filename: str | None = None) -> Path | None:
+    """Download a PDF from a URL."""
+    if not filename:
+        # Derive filename from URL
+        filename = url.split("/")[-1]
+        if not filename.endswith(".pdf"):
+            filename += ".pdf"
+    filename = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
+
+    pdf_path = output_dir / filename
+    try:
+        resp = httpx.get(url, timeout=60, follow_redirects=True)
+        if resp.status_code != 200:
+            log.warning("PDF download failed (%s): %s", resp.status_code, url)
+            return None
+        pdf_path.write_bytes(resp.content)
+        log.info("Downloaded PDF: %s (%.1f KB)", pdf_path.name, len(resp.content) / 1024)
+        return pdf_path
+    except Exception as e:
+        log.warning("PDF download error: %s", e)
+        return None
+
+
+def extract_text_from_pdf(pdf_path: Path) -> str:
+    """Extract text from a PDF using pymupdf4llm. Handles multi-column GPO layouts."""
+    try:
+        import pymupdf4llm
+        text = pymupdf4llm.to_markdown(str(pdf_path))
+        return text
+    except ImportError:
+        log.warning("pymupdf4llm not installed, falling back to pymupdf")
+    except Exception as e:
+        log.warning("pymupdf4llm extraction failed: %s, falling back", e)
+
+    # Fallback to basic pymupdf
+    try:
+        import pymupdf
+        doc = pymupdf.open(str(pdf_path))
+        pages = []
+        for page in doc:
+            pages.append(page.get_text())
+        doc.close()
+        return "\n\n".join(pages)
+    except Exception as e:
+        log.error("PDF extraction failed entirely: %s", e)
+        return ""
+
+
+def process_testimony_pdfs(pdf_urls: list[str], output_dir: Path) -> list[dict]:
+    """Download and extract text from a list of testimony PDF URLs."""
+    testimony_dir = output_dir / "testimony"
+    testimony_dir.mkdir(parents=True, exist_ok=True)
+
+    results = []
+    for url in pdf_urls:
+        pdf_path = download_pdf(url, testimony_dir)
+        if not pdf_path:
+            continue
+
+        text = extract_text_from_pdf(pdf_path)
+        if not text.strip():
+            log.warning("Empty text from %s", pdf_path.name)
+            continue
+
+        # Save extracted text
+        txt_name = pdf_path.stem + ".txt"
+        txt_path = testimony_dir / txt_name
+        txt_path.write_text(text)
+
+        # Clean up PDF to save disk
+        pdf_path.unlink(missing_ok=True)
+
+        results.append({
+            "source_url": url,
+            "text_file": str(txt_path),
+            "chars": len(text),
+        })
+        log.info("Extracted testimony: %s (%d chars)", txt_name, len(text))
+
+    return results
+
+
+def fetch_govinfo_transcript(package_id: str, output_dir: Path) -> Path | None:
+    """Download the official GPO transcript text from GovInfo API.
+
+    Tries direct package endpoints (htm, then pdf) since the summary download
+    links often only include premis/zip/mods but not the actual content links.
+    """
+    api_key = config.GOVINFO_API_KEY
+
+    # Try HTML first (cleanest), then PDF
+    for ext in ("htm", "pdf"):
+        url = f"https://api.govinfo.gov/packages/{package_id}/{ext}?api_key={api_key}"
+        try:
+            resp = httpx.get(url, timeout=120, follow_redirects=True)
+            if resp.status_code != 200:
+                continue
+
+            if ext == "htm":
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(resp.text, "lxml")
+                text = soup.get_text(separator="\n")
+                txt_path = output_dir / "govinfo_transcript.txt"
+                txt_path.write_text(text)
+                log.info("GovInfo transcript (HTML): %d chars", len(text))
+                return txt_path
+            else:
+                # PDF — save, extract, clean up
+                pdf_path = output_dir / "govinfo_transcript.pdf"
+                pdf_path.write_bytes(resp.content)
+                text = extract_text_from_pdf(pdf_path)
+                txt_path = output_dir / "govinfo_transcript.txt"
+                txt_path.write_text(text)
+                pdf_path.unlink(missing_ok=True)
+                log.info("GovInfo transcript (PDF): %d chars", len(text))
+                return txt_path
+
+        except Exception as e:
+            log.warning("GovInfo download failed for %s (%s): %s", package_id, ext, e)
+            continue
+
+    return None
