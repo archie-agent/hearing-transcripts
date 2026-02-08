@@ -1,0 +1,8 @@
+yt-dlp
+openai
+httpx
+pymupdf
+pdfplumber
+python-dotenv
+beautifulsoup4
+lxml
