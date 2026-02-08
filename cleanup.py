@@ -55,8 +55,8 @@ def _get_api_key() -> str:
     if api_key:
         return api_key
 
-    # Fall back to reading from .env file
-    env_path = Path("/Users/agent/clawd/skills/research-notes-ingest/.env")
+    # Fall back to reading from .env file (project-local)
+    env_path = Path(__file__).parent / ".env"
     if env_path.exists():
         try:
             with open(env_path) as f:
@@ -70,8 +70,7 @@ def _get_api_key() -> str:
             logger.warning(f"Failed to read .env file: {e}")
 
     raise ValueError(
-        "OPENROUTER_API_KEY not found. Set the environment variable or add it to "
-        "/Users/agent/clawd/skills/research-notes-ingest/.env"
+        "OPENROUTER_API_KEY not found. Set the environment variable or add it to .env"
     )
 
 
