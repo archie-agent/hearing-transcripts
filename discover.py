@@ -12,7 +12,7 @@ import sys
 import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -806,18 +806,45 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
     # Attach YouTube clips to matching website hearings
     _attach_youtube_clips(deduped)
 
-    # C-SPAN discovery: find video URLs for hearings.
-    # Uses 3-layer strategy: broad search, targeted for active committees,
-    # and rotation for stale committees (requires state for Layer 3).
+    # C-SPAN discovery: 3-step strategy (Google → targeted → rotation)
     try:
         import cspan
-        active_keys = {h.committee_key for h in deduped}
-        cspan_videos = cspan.discover_cspan(
-            committees, days=max(days, 7), active_keys=active_keys,
-            state=state,
-        )
-        if cspan_videos:
-            _attach_cspan_urls(deduped, cspan_videos)
+
+        # Step 1: Google-based C-SPAN lookup (free, zero WAF cost)
+        unmatched = [h for h in deduped if "cspan_url" not in h.sources]
+        if unmatched:
+            google_results = cspan.discover_cspan_google(
+                [{"id": h.id, "title": h.title, "date": h.date,
+                  "committee_key": h.committee_key}
+                 for h in unmatched]
+            )
+            for r in google_results:
+                for h in deduped:
+                    if h.id == r["hearing_id"]:
+                        h.sources["cspan_url"] = r["cspan_url"]
+                        break
+
+        # Step 2: Title-based C-SPAN search for remaining (WAF-limited)
+        still_unmatched = [h for h in deduped if "cspan_url" not in h.sources]
+        if still_unmatched:
+            targeted_results = cspan.discover_cspan_targeted(
+                [{"id": h.id, "title": h.title, "date": h.date,
+                  "committee_key": h.committee_key,
+                  "committee_name": h.committee_name}
+                 for h in still_unmatched],
+                state=state,
+            )
+            if targeted_results:
+                _attach_cspan_urls(deduped, targeted_results)
+
+        # Step 3: Weekly committee rotation (background, low priority)
+        if state and _should_rotate(state):
+            rotation_results = cspan.discover_cspan_rotation(
+                committees, days=max(days, 7), state=state,
+            )
+            if rotation_results:
+                _attach_cspan_urls(deduped, rotation_results)
+
     except ImportError:
         log.debug("cspan module not available, skipping C-SPAN discovery")
     except Exception as e:
@@ -972,6 +999,18 @@ def _cross_committee_dedup(hearings: list[Hearing]) -> list[Hearing]:
                 result.append(h)
 
     return result
+
+
+_ROTATION_INTERVAL_DAYS = 7
+
+
+def _should_rotate(state) -> bool:
+    """Check if enough time has passed since last committee rotation search."""
+    last = state.get_last_rotation_time()
+    if last is None:
+        return True
+    age = (datetime.now(timezone.utc) - last).days
+    return age >= _ROTATION_INTERVAL_DAYS
 
 
 def _keyword_overlap(title_a: str, title_b: str) -> int:

@@ -1,7 +1,8 @@
 """C-SPAN caption discovery and extraction for congressional hearings.
 
-Discovers hearing videos via C-SPAN search (using sponsorid per committee)
-and extracts broadcast-quality closed captions via the transcript JSON API.
+Discovers hearing videos via C-SPAN search (using sponsorid per committee),
+Google site-search, and extracts broadcast-quality closed captions via the
+transcript JSON API.
 """
 
 from __future__ import annotations
@@ -11,7 +12,12 @@ import logging
 import re
 import time as _time
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import quote_plus
+
+import httpx
+
 import config
 
 log = logging.getLogger(__name__)
@@ -48,30 +54,159 @@ BATCH_SIZE = 2
 BATCH_COOLDOWN = 45  # seconds between batches
 
 
-def discover_cspan(committees: dict, days: int = 7,
-                    active_keys: set[str] | None = None,
-                    state=None) -> list[dict]:
-    """Search C-SPAN for recent hearing videos using a 2-layer strategy.
+def _launch_cspan_browser(p):
+    """Launch a Playwright browser configured for C-SPAN."""
+    browser = p.chromium.launch(headless=True)
+    context = browser.new_context(user_agent=_UA)
+    page = context.new_page()
+    return browser, context, page
 
-    Layer 1 (targeted): Per-committee search for committees with known
-             hearings from other sources (active_keys). Sorted by tier.
-    Layer 2 (rotation): Search stale committees not searched recently,
-             ensuring all committees get checked every ~5 days.
 
-    WAF behavior: CloudFront captcha triggers after ~2 page loads.
-    Recovery: close browser, wait 60s, relaunch — consistently works.
-    Each search effectively takes ~70s due to captcha + cooldown cycle.
-    Batch cooldown every BATCH_SIZE pages to reduce captcha frequency.
+def discover_cspan_targeted(
+    unmatched_hearings: list[dict],
+    state=None,
+    max_searches: int = 6,
+) -> list[dict]:
+    """Search C-SPAN for specific hearings by title keywords. WAF-limited.
+
+    Only searches hearings that don't already have a C-SPAN URL (failed
+    Google lookup) and haven't been searched before (tracked in state).
+
+    Args:
+        unmatched_hearings: [{id, title, date, committee_key, committee_name}, ...]
+        state: State instance for tracking which hearings were searched
+        max_searches: WAF budget cap
+
+    Returns:
+        [{hearing_id, cspan_url, program_id, title, date, committee_key}, ...]
+    """
+    if not unmatched_hearings:
+        return []
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        log.warning("playwright not installed, skipping targeted C-SPAN search")
+        return []
+
+    # Filter out already-searched hearings
+    to_search = []
+    for h in unmatched_hearings:
+        if state and state.is_cspan_searched(h["id"]):
+            continue
+        to_search.append(h)
+
+    if not to_search:
+        log.info("C-SPAN targeted: all hearings already searched")
+        return []
+
+    if len(to_search) > max_searches:
+        log.info("C-SPAN targeted: capping from %d to %d (WAF budget)",
+                 len(to_search), max_searches)
+        to_search = to_search[:max_searches]
+
+    cutoff = datetime.now() - timedelta(days=30)  # generous for title matching
+    results: list[dict] = []
+    searches_done = 0
+    waf_blocked = False
+
+    with sync_playwright() as p:
+        browser, context, page = _launch_cspan_browser(p)
+
+        for h in to_search:
+            if waf_blocked:
+                break
+
+            # Batch cooldown
+            if searches_done > 0 and searches_done % BATCH_SIZE == 0:
+                log.info("C-SPAN targeted: cooldown (%ds) after %d searches",
+                         BATCH_COOLDOWN, searches_done)
+                _time.sleep(BATCH_COOLDOWN)
+
+            # Build search query from title keywords
+            keywords = _extract_search_keywords(h["title"])
+            if not keywords:
+                if state:
+                    state.record_cspan_title_search(h["id"], found=False)
+                continue
+
+            search_url = (
+                f"https://www.c-span.org/search/?query={quote_plus(keywords)}"
+                f"&searchtype=Videos&sort=Most+Recent+Event"
+            )
+            _rate_limit()
+
+            try:
+                page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(7000)
+                searches_done += 1
+
+                # WAF detection
+                body_text = (page.inner_text("body") or "")[:300]
+                if "confirm you are human" in body_text.lower():
+                    log.info("C-SPAN targeted: WAF captcha at search %d, "
+                             "cooldown 60s...", searches_done)
+                    context.close()
+                    browser.close()
+                    _time.sleep(60)
+                    browser, context, page = _launch_cspan_browser(p)
+                    _rate_limit()
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(7000)
+                    body_text = (page.inner_text("body") or "")[:300]
+                    if "confirm you are human" in body_text.lower():
+                        log.warning("C-SPAN targeted: WAF still blocked after cooldown")
+                        waf_blocked = True
+                        break
+
+                search_results = _parse_search_results(page, cutoff)
+
+                # Match by date + keyword overlap
+                found = False
+                for sr in search_results:
+                    if sr["date"] == h.get("date"):
+                        sr["hearing_id"] = h["id"]
+                        sr["committee_key"] = h.get("committee_key", "")
+                        sr["cspan_url"] = sr["url"]
+                        results.append(sr)
+                        found = True
+                        log.debug("C-SPAN targeted: matched '%s' -> %s",
+                                  h["title"][:40], sr["program_id"])
+                        break
+
+                if state:
+                    state.record_cspan_title_search(h["id"], found=found)
+
+            except Exception as e:
+                log.warning("C-SPAN targeted search failed for '%s': %s",
+                            h["title"][:40], e)
+                if state:
+                    state.record_cspan_title_search(h["id"], found=False)
+
+        browser.close()
+
+    log.info("C-SPAN targeted: %d found from %d searches", len(results), searches_done)
+    return results
+
+
+def discover_cspan_rotation(
+    committees: dict,
+    days: int = 7,
+    state=None,
+) -> list[dict]:
+    """Background committee rotation: search stale committees for new hearings.
+
+    This is the original committee-based C-SPAN search, now demoted to
+    weekly background duty. Most C-SPAN URL discovery is handled by
+    discover_cspan_google() and discover_cspan_targeted().
 
     Args:
         committees: Full committee dict from config
         days: How many days back to search
-        active_keys: If provided, committees with known hearings needing C-SPAN match.
-        state: Optional State instance for rotation tracking.
+        state: State instance for rotation tracking.
 
     Returns:
         [{title, date, url, program_id, committee_key}, ...] — flat list.
-        Matching to specific hearings is done by the caller via date + title.
     """
     cspan_committees = [
         (key, meta) for key, meta in committees.items()
@@ -85,7 +220,7 @@ def discover_cspan(committees: dict, days: int = 7,
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        log.warning("playwright not installed, skipping C-SPAN discovery")
+        log.warning("playwright not installed, skipping C-SPAN rotation")
         return []
 
     cutoff = datetime.now() - timedelta(days=days)
@@ -96,22 +231,13 @@ def discover_cspan(committees: dict, days: int = 7,
     waf_blocked = False
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=_UA)
-        page = context.new_page()
+        browser, context, page = _launch_cspan_browser(p)
 
         def _search_committee(cspan_id: str, label: str) -> list[dict]:
-            """Search C-SPAN for a single committee's hearings.
-
-            Handles WAF captcha detection with 60s cooldown + retry.
-            Returns parsed hearings list, or empty list on failure.
-            Sets nonlocal waf_blocked=True if retry also fails.
-            """
             nonlocal searches_done, waf_blocked, context, page, browser
 
-            # Cooldown between batches to reduce captcha frequency
             if searches_done > 0 and searches_done % BATCH_SIZE == 0:
-                log.info("C-SPAN: cooldown (%ds) after %d searches",
+                log.info("C-SPAN rotation: cooldown (%ds) after %d searches",
                          BATCH_COOLDOWN, searches_done)
                 _time.sleep(BATCH_COOLDOWN)
 
@@ -126,92 +252,64 @@ def discover_cspan(committees: dict, days: int = 7,
                 page.wait_for_timeout(7000)
                 searches_done += 1
 
-                # WAF detection
                 body_text = (page.inner_text("body") or "")[:300]
                 if "confirm you are human" in body_text.lower():
-                    log.info("C-SPAN WAF captcha at search %d (%s), "
+                    log.info("C-SPAN rotation: WAF captcha at search %d (%s), "
                              "cooldown 60s...", searches_done, label)
                     context.close()
                     browser.close()
                     _time.sleep(60)
-                    browser = p.chromium.launch(headless=True)
-                    context = browser.new_context(user_agent=_UA)
-                    page = context.new_page()
+                    browser, context, page = _launch_cspan_browser(p)
                     _rate_limit()
                     page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
                     page.wait_for_timeout(7000)
                     body_text = (page.inner_text("body") or "")[:300]
                     if "confirm you are human" in body_text.lower():
-                        log.warning("C-SPAN WAF still active after cooldown, "
-                                    "aborting (collected %d hearings)",
-                                    len(all_results))
+                        log.warning("C-SPAN rotation: WAF still blocked, aborting")
                         waf_blocked = True
                         return []
 
                 return _parse_search_results(page, cutoff)
 
             except Exception as e:
-                log.warning("C-SPAN search failed for %s: %s", label, e)
+                log.warning("C-SPAN rotation search failed for %s: %s", label, e)
                 return []
 
-        # ---------------------------------------------------------------
-        # Build search queue: targeted (active) first, then rotation (stale)
-        # ---------------------------------------------------------------
+        # Build rotation queue: stale or never-searched committees
         search_queue: list[tuple[str, dict]] = []
-        covered_committees: set[str] = set()
 
-        # Layer 1: targeted — committees with known hearings needing C-SPAN
-        if active_keys:
-            targeted = [
-                (key, meta) for key, meta in cspan_committees
-                if key in active_keys
-            ]
-            targeted.sort(key=lambda x: x[1].get("tier", 99))
-            search_queue.extend(targeted)
-
-        # Layer 2: rotation — stale or never-searched committees
         if state:
-            stale_keys = set(state.get_stale_committees(max_age_days=5))
             all_cspan_keys = {key for key, _ in cspan_committees}
-            targeted_keys = {key for key, _ in search_queue}
+            cspan_meta = {key: meta for key, meta in cspan_committees}
+
             never_searched = [
                 key for key in all_cspan_keys
-                if key not in targeted_keys
-                and state.get_cspan_search_age(key) is None
+                if state.get_cspan_search_age(key) is None
             ]
-            stale_not_targeted = [
-                k for k in state.get_stale_committees(max_age_days=5)
-                if k not in targeted_keys
-            ]
-            rotation = never_searched + stale_not_targeted
-            # Add rotation entries with metadata
-            cspan_meta = {key: meta for key, meta in cspan_committees}
+            stale = state.get_stale_committees(max_age_days=5)
+
+            rotation = never_searched + [k for k in stale if k not in never_searched]
             for key in rotation:
                 meta = cspan_meta.get(key)
-                if meta and (key, meta) not in search_queue:
+                if meta:
                     search_queue.append((key, meta))
+        else:
+            # Without state, search all committees (legacy behavior)
+            search_queue = list(cspan_committees)
 
-        # Cap to budget
         if len(search_queue) > _MAX_CSPAN_SEARCHES:
-            log.info("C-SPAN: capping queue from %d to %d (WAF budget)",
+            log.info("C-SPAN rotation: capping from %d to %d",
                      len(search_queue), _MAX_CSPAN_SEARCHES)
             search_queue = search_queue[:_MAX_CSPAN_SEARCHES]
 
         if not search_queue:
-            log.info("C-SPAN: no committees to search")
+            log.info("C-SPAN rotation: no stale committees to search")
             browser.close()
             return []
 
-        n_targeted = sum(1 for k, _ in search_queue if active_keys and k in active_keys)
-        n_rotation = len(search_queue) - n_targeted
-        log.info("C-SPAN discovery: %d committees (%d targeted, %d rotation)",
-                 len(search_queue), n_targeted, n_rotation)
+        log.info("C-SPAN rotation: searching %d stale committees", len(search_queue))
 
-        # ---------------------------------------------------------------
-        # Execute searches
-        # ---------------------------------------------------------------
         consecutive_empty = 0
-
         for key, meta in search_queue:
             if waf_blocked:
                 break
@@ -229,32 +327,29 @@ def discover_cspan(committees: dict, days: int = 7,
                     all_results.append(h)
                     new += 1
 
-            covered_committees.add(key)
             if state:
                 state.record_cspan_search(key, new)
 
             if new:
                 consecutive_empty = 0
-                log.info("  C-SPAN %s: %d hearings", key, new)
+                log.info("  C-SPAN rotation %s: %d hearings", key, new)
             else:
                 consecutive_empty += 1
-                log.debug("  C-SPAN %s: no recent hearings", key)
-                # Silent WAF: page loads but no links rendered
+                log.debug("  C-SPAN rotation %s: no recent hearings", key)
                 if consecutive_empty >= 4:
-                    raw_links = page.query_selector_all("a[href*='/program/']")
+                    raw_links = page.query_selector_all(
+                        "a[href*='/program/'], a[href*='/event/']"
+                    )
                     if len(raw_links) == 0:
-                        log.warning("C-SPAN: %d consecutive empty — "
+                        log.warning("C-SPAN rotation: %d consecutive empty — "
                                     "likely WAF silent block, aborting",
                                     consecutive_empty)
                         break
 
         browser.close()
 
-    log.info("C-SPAN discovery: %d hearings from %d searches "
-             "(%d targeted, %d rotation)",
-             len(all_results), searches_done,
-             len(covered_committees & (active_keys or set())),
-             len(covered_committees - (active_keys or set())))
+    log.info("C-SPAN rotation: %d hearings from %d searches",
+             len(all_results), searches_done)
     return all_results
 
 
@@ -269,13 +364,13 @@ def _parse_search_results(page, cutoff: datetime) -> list[dict]:
     hearings = []
     seen_program_ids = set()
 
-    # Find all program links (each result has two: image + title)
-    items = page.query_selector_all("a[href*='/program/']")
+    # Find all program/event links (each result has two: image + title)
+    items = page.query_selector_all("a[href*='/program/'], a[href*='/event/']")
 
     for item in items:
         try:
             href = item.get_attribute("href") or ""
-            if "/program/" not in href:
+            if "/program/" not in href and "/event/" not in href:
                 continue
 
             # Normalize URL
@@ -289,8 +384,8 @@ def _parse_search_results(page, cutoff: datetime) -> list[dict]:
             if not title or len(title) < 10:
                 continue
 
-            # Extract program ID from URL: /program/.../672588
-            prog_match = re.search(r"/program/[^/]+/[^/]+/(\d+)", href)
+            # Extract program ID from URL: /program/.../672588 or /event/.../434689
+            prog_match = re.search(r"/(?:program|event)/[^/]+/[^/]+/(\d+)", href)
             if not prog_match:
                 continue
             program_id = prog_match.group(1)
@@ -338,6 +433,151 @@ def _parse_search_results(page, cutoff: datetime) -> list[dict]:
             continue
 
     return hearings
+
+
+# ---------------------------------------------------------------------------
+# Google-based C-SPAN URL lookup (zero WAF cost)
+# ---------------------------------------------------------------------------
+
+_GOOGLE_DELAY = 2.0  # seconds between Google searches
+_GOOGLE_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+_STOPWORDS = {
+    "the", "a", "an", "of", "in", "on", "to", "for", "and", "or",
+    "at", "by", "is", "it", "as", "be", "was", "are", "its", "with",
+    "that", "this", "from", "before", "after", "hearing", "committee",
+    "subcommittee", "full", "oversight", "examine", "examining",
+    "regarding", "concerning", "review", "united", "states", "senate",
+    "house", "congress", "testifies", "testimony", "witnesses",
+}
+
+
+def _extract_search_keywords(title: str, max_words: int = 5) -> str:
+    """Extract significant keywords from a hearing title for search."""
+    words = re.sub(r"[^a-z0-9\s]", "", title.lower()).split()
+    significant = [w for w in words if len(w) >= 3 and w not in _STOPWORDS]
+    return " ".join(significant[:max_words])
+
+
+class _GoogleResultParser(HTMLParser):
+    """Minimal parser to extract URLs from Google search result HTML."""
+
+    def __init__(self):
+        super().__init__()
+        self.urls: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        for name, value in attrs:
+            if name == "href" and value:
+                # Google wraps results in /url?q=<actual_url>&...
+                if value.startswith("/url?"):
+                    m = re.search(r"[?&]q=(https?://[^&]+)", value)
+                    if m:
+                        self.urls.append(m.group(1))
+                elif value.startswith("https://www.c-span.org/"):
+                    self.urls.append(value)
+
+
+def discover_cspan_google(
+    hearings: list[dict],
+    max_searches: int = 20,
+) -> list[dict]:
+    """Find C-SPAN URLs via Google site search. No WAF cost.
+
+    Args:
+        hearings: [{id, title, date, committee_key}, ...]
+        max_searches: cap on Google queries per run
+
+    Returns:
+        [{hearing_id, cspan_url, program_id}, ...]
+    """
+    if not hearings:
+        return []
+
+    results: list[dict] = []
+    searches = 0
+
+    for h in hearings:
+        if searches >= max_searches:
+            log.info("Google C-SPAN: hit search cap (%d)", max_searches)
+            break
+
+        keywords = _extract_search_keywords(h["title"])
+        if not keywords:
+            continue
+
+        # Add date context for better matching
+        date_str = h.get("date", "")
+        date_words = ""
+        if date_str:
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                date_words = dt.strftime("%B %Y")  # e.g. "February 2026"
+            except ValueError:
+                pass
+
+        query = f"site:c-span.org {keywords}"
+        if date_words:
+            query += f" {date_words}"
+
+        search_url = f"https://www.google.com/search?q={quote_plus(query)}&num=5"
+
+        _time.sleep(_GOOGLE_DELAY)
+        searches += 1
+
+        try:
+            resp = httpx.get(
+                search_url,
+                headers={"User-Agent": _GOOGLE_UA},
+                follow_redirects=True,
+                timeout=15.0,
+            )
+            if resp.status_code != 200:
+                log.debug("Google search returned %d for '%s'", resp.status_code, keywords[:40])
+                continue
+
+            # Parse HTML for C-SPAN URLs
+            parser = _GoogleResultParser()
+            parser.feed(resp.text)
+
+            # Find first /program/ or /event/ URL
+            cspan_url = None
+            program_id = None
+            for url in parser.urls:
+                if "c-span.org" not in url:
+                    continue
+                m = re.search(r"/(?:program|event)/[^/]+/[^/]+/(\d+)", url)
+                if m:
+                    cspan_url = url
+                    program_id = m.group(1)
+                    break
+
+            if cspan_url and program_id:
+                # Normalize URL
+                if cspan_url.startswith("//"):
+                    cspan_url = "https:" + cspan_url
+                results.append({
+                    "hearing_id": h["id"],
+                    "cspan_url": cspan_url,
+                    "program_id": program_id,
+                })
+                log.debug("Google C-SPAN: found %s for '%s'", program_id, h["title"][:50])
+            else:
+                log.debug("Google C-SPAN: no match for '%s'", h["title"][:50])
+
+        except Exception as e:
+            log.debug("Google search error for '%s': %s", keywords[:30], e)
+            continue
+
+    log.info("Google C-SPAN: %d found from %d searches (%d hearings queried)",
+             len(results), searches, len(hearings))
+    return results
 
 
 # ---------------------------------------------------------------------------

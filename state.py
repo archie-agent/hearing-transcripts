@@ -87,6 +87,14 @@ class State:
                 )
             """)
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cspan_title_searches (
+                    hearing_id TEXT PRIMARY KEY,
+                    searched_at TEXT,
+                    found INTEGER DEFAULT 0
+                )
+            """)
+
             conn.commit()
         finally:
             conn.close()
@@ -406,5 +414,54 @@ class State:
                 if age >= max_age_days:
                     stale.append(row["committee_key"])
             return stale
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # C-SPAN title search tracking (per-hearing, avoids re-searching)
+    # ------------------------------------------------------------------
+
+    def is_cspan_searched(self, hearing_id: str) -> bool:
+        """Check if we've already done a title search for this hearing."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                "SELECT hearing_id FROM cspan_title_searches WHERE hearing_id = ?",
+                (hearing_id,),
+            )
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+
+    def record_cspan_title_search(self, hearing_id: str, found: bool) -> None:
+        """Record that a C-SPAN title search was done for this hearing."""
+        conn = self._get_conn()
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute("""
+                INSERT INTO cspan_title_searches (hearing_id, searched_at, found)
+                VALUES (?, ?, ?)
+                ON CONFLICT(hearing_id) DO UPDATE
+                SET searched_at = excluded.searched_at,
+                    found = excluded.found
+            """, (hearing_id, now, 1 if found else 0))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_last_rotation_time(self) -> datetime | None:
+        """Return the most recent C-SPAN committee rotation search time, or None."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                "SELECT MAX(last_searched) as latest FROM cspan_searches"
+            )
+            row = cursor.fetchone()
+            if row is None or row["latest"] is None:
+                return None
+            last = datetime.fromisoformat(row["latest"])
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            return last
         finally:
             conn.close()
