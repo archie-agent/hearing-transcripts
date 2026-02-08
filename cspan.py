@@ -42,64 +42,72 @@ def _rate_limit(domain: str = "www.c-span.org") -> None:
 # C-SPAN discovery: find hearing videos for our committees via search
 # ---------------------------------------------------------------------------
 
+_MAX_CSPAN_SEARCHES = 12  # stay under WAF captcha threshold (~15 pages/session)
+
+
 def discover_cspan(committees: dict, days: int = 7,
-                    active_keys: set[str] | None = None) -> dict[str, list[dict]]:
+                    active_keys: set[str] | None = None) -> list[dict]:
     """Search C-SPAN for recent hearing videos per committee.
 
-    Uses the C-SPAN search page with sponsorid filter to find program URLs.
-    Each committee with a cspan_id gets one search-page load.
+    Uses per-committee search with sponsorid filter, sorted by tier so
+    the most important committees are searched first. Caps at _MAX_CSPAN_SEARCHES
+    to stay under C-SPAN's aggressive CloudFront WAF threshold.
 
     Args:
         committees: Full committee dict from config
         days: How many days back to search
-        active_keys: If provided, only search these committee keys (those with
-            hearings from other discovery sources). Drastically reduces requests
-            to avoid C-SPAN's aggressive CloudFront WAF.
+        active_keys: If provided, only search these committee keys.
 
     Returns:
-        {committee_key: [{title, date, url, program_id}, ...]}
+        [{title, date, url, program_id}, ...] — flat list.
+        Matching to specific hearings is done by the caller via date + title.
     """
-    cspan_committees = {
-        key: meta for key, meta in committees.items()
+    cspan_committees = [
+        (key, meta) for key, meta in committees.items()
         if meta.get("cspan_id")
-    }
-    # Filter to only active committees if specified
+    ]
     if active_keys is not None:
-        cspan_committees = {
-            key: meta for key, meta in cspan_committees.items()
+        cspan_committees = [
+            (key, meta) for key, meta in cspan_committees
             if key in active_keys
-        }
+        ]
 
     if not cspan_committees:
-        log.info("No committees to check on C-SPAN (active_keys filter applied)")
-        return {}
+        log.info("No committees to check on C-SPAN")
+        return []
+
+    # Sort by tier (lower = higher priority) so we search important ones first
+    cspan_committees.sort(key=lambda x: x[1].get("tier", 99))
+    # Cap to avoid WAF
+    if len(cspan_committees) > _MAX_CSPAN_SEARCHES:
+        log.info("C-SPAN: capping from %d to %d committees (WAF limit)",
+                 len(cspan_committees), _MAX_CSPAN_SEARCHES)
+        cspan_committees = cspan_committees[:_MAX_CSPAN_SEARCHES]
 
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         log.warning("playwright not installed, skipping C-SPAN discovery")
-        return {}
+        return []
 
     cutoff = datetime.now() - timedelta(days=days)
-    results: dict[str, list[dict]] = {}
 
-    log.info("C-SPAN discovery: checking %d committees", len(cspan_committees))
+    log.info("C-SPAN discovery: searching %d committees (by tier)",
+             len(cspan_committees))
 
-    # CloudFront WAF tracks by IP and triggers captcha aggressively.
-    # Rotate browser context every _BATCH_SIZE committees and detect WAF.
-    _BATCH_SIZE = 5
-    _MAX_WAF_RETRIES = 1  # retry once with a new browser after WAF
-    waf_hits = 0
+    all_results: list[dict] = []
+    seen_ids: set[str] = set()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(user_agent=_UA)
         page = context.new_page()
         pages_loaded = 0
+        consecutive_empty = 0
 
-        for key, meta in cspan_committees.items():
-            # Rotate context to avoid WAF captcha
-            if pages_loaded > 0 and pages_loaded % _BATCH_SIZE == 0:
+        for key, meta in cspan_committees:
+            # Rotate context every 5 pages
+            if pages_loaded > 0 and pages_loaded % 5 == 0:
                 context.close()
                 context = browser.new_context(user_agent=_UA)
                 page = context.new_page()
@@ -114,45 +122,40 @@ def discover_cspan(committees: dict, days: int = 7,
 
             try:
                 page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(6000)  # let search results render
+                page.wait_for_timeout(7000)
                 pages_loaded += 1
 
-                # WAF detection: check for captcha page
+                # WAF detection: explicit captcha
                 body_text = (page.inner_text("body") or "")[:300]
                 if "confirm you are human" in body_text.lower():
-                    waf_hits += 1
-                    log.warning("C-SPAN WAF captcha detected at page %d (%s)",
-                                pages_loaded, key)
-                    if waf_hits > _MAX_WAF_RETRIES:
-                        log.warning("C-SPAN WAF: aborting after %d captcha(s), "
-                                    "collected %d hearings so far", waf_hits,
-                                    sum(len(v) for v in results.values()))
-                        break
-                    # Retry: close everything, wait, new browser
-                    context.close()
-                    browser.close()
-                    log.info("C-SPAN: waiting 30s for WAF cooldown...")
-                    _time.sleep(30)
-                    browser = p.chromium.launch(headless=True)
-                    context = browser.new_context(user_agent=_UA)
-                    page = context.new_page()
-                    pages_loaded = 0
-                    # Retry this committee
-                    _rate_limit()
-                    page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(6000)
-                    pages_loaded += 1
-                    body_text = (page.inner_text("body") or "")[:300]
-                    if "confirm you are human" in body_text.lower():
-                        log.warning("C-SPAN WAF still active after cooldown, aborting")
-                        break
+                    log.warning("C-SPAN WAF captcha at page %d (%s), aborting "
+                                "(collected %d hearings)", pages_loaded, key,
+                                len(all_results))
+                    break
 
+                # Parse results
+                raw_links = page.query_selector_all("a[href*='/program/']")
                 hearings = _parse_search_results(page, cutoff)
-                if hearings:
-                    results[key] = hearings
-                    log.info("  C-SPAN %s: %d hearings found", key, len(hearings))
+                new = 0
+                for h in hearings:
+                    if h["program_id"] not in seen_ids:
+                        seen_ids.add(h["program_id"])
+                        all_results.append(h)
+                        new += 1
+
+                if new:
+                    consecutive_empty = 0
+                    log.info("  C-SPAN %s: %d hearings found", key, new)
                 else:
-                    log.debug("  C-SPAN %s: no recent hearings", key)
+                    consecutive_empty += 1
+                    log.debug("  C-SPAN %s: no recent hearings (links=%d)",
+                              key, len(raw_links))
+                    # Silent WAF: page loads but no links rendered
+                    if consecutive_empty >= 3 and len(raw_links) == 0:
+                        log.warning("C-SPAN: %d consecutive empty pages — "
+                                    "likely WAF silent block, aborting",
+                                    consecutive_empty)
+                        break
 
             except Exception as e:
                 log.warning("C-SPAN discovery failed for %s: %s", key, e)
@@ -160,9 +163,8 @@ def discover_cspan(committees: dict, days: int = 7,
 
         browser.close()
 
-    total = sum(len(v) for v in results.values())
-    log.info("C-SPAN discovery: %d hearings across %d committees", total, len(results))
-    return results
+    log.info("C-SPAN discovery: %d hearings from %d pages", len(all_results), pages_loaded)
+    return all_results
 
 
 def _parse_search_results(page, cutoff: datetime) -> list[dict]:

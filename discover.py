@@ -807,11 +807,11 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None) -> li
     try:
         import cspan
         active_keys = {h.committee_key for h in deduped}
-        cspan_results = cspan.discover_cspan(
+        cspan_videos = cspan.discover_cspan(
             committees, days=max(days, 7), active_keys=active_keys,
         )
-        if cspan_results:
-            _attach_cspan_urls(deduped, cspan_results)
+        if cspan_videos:
+            _attach_cspan_urls(deduped, cspan_videos)
     except ImportError:
         log.debug("cspan module not available, skipping C-SPAN discovery")
     except Exception as e:
@@ -968,49 +968,49 @@ def _cross_committee_dedup(hearings: list[Hearing]) -> list[Hearing]:
     return result
 
 
-def _attach_cspan_urls(hearings: list[Hearing], cspan_results: dict[str, list[dict]]) -> None:
-    """Match C-SPAN video URLs to hearings by committee_key + date.
+def _attach_cspan_urls(hearings: list[Hearing], cspan_videos: list[dict]) -> None:
+    """Match C-SPAN video URLs to hearings by date + title similarity.
 
-    C-SPAN results are keyed by committee_key with lists of {title, date, url}.
-    Most committees have at most 1 hearing per day, so committee+date is ~90%
-    sufficient. Title keyword overlap is used as a tiebreaker when there are
-    multiple hearings on the same day.
+    C-SPAN videos are a flat list of {title, date, url, program_id} from
+    batched searches. We match each video to the best hearing by date first,
+    then title similarity.
     """
     attached = 0
-    for key, videos in cspan_results.items():
-        for video in videos:
-            video_date = video.get("date", "")
-            video_title = video.get("title", "")
-            video_url = video.get("url", "")
-            if not video_url or not video_date:
-                continue
+    for video in cspan_videos:
+        video_date = video.get("date", "")
+        video_title = video.get("title", "")
+        video_url = video.get("url", "")
+        if not video_url or not video_date:
+            continue
 
-            # Find matching hearings (same committee + date)
-            candidates = [
-                h for h in hearings
-                if h.committee_key == key and h.date == video_date
-            ]
+        # Find hearings on the same date
+        candidates = [h for h in hearings if h.date == video_date]
+        if not candidates:
+            log.debug("  C-SPAN unmatched (no date): %s %s", video_date, video_title[:40])
+            continue
 
-            if not candidates:
-                log.debug("  C-SPAN unmatched: %s %s %s",
-                          key, video_date, video_title[:40])
-                continue
+        # Score by title similarity
+        scored = [(h, _title_similarity(h.title, video_title)) for h in candidates]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        best, best_sim = scored[0]
 
-            if len(candidates) == 1:
-                best = candidates[0]
-            else:
-                # Multiple hearings same day — use title similarity
-                best = max(candidates,
-                           key=lambda h: _title_similarity(h.title, video_title))
+        # Require minimum similarity to avoid false matches
+        if best_sim < 0.15:
+            log.debug("  C-SPAN unmatched (low sim %.2f): %s -> %s",
+                      best_sim, video_title[:40], best.title[:40])
+            continue
 
-            if "cspan_url" not in best.sources:
-                best.sources["cspan_url"] = video_url
-                attached += 1
-                log.debug("  C-SPAN matched: %s -> %s", video_title[:40],
-                          best.title[:40])
+        if "cspan_url" not in best.sources:
+            best.sources["cspan_url"] = video_url
+            attached += 1
+            log.debug("  C-SPAN matched (sim=%.2f): %s -> %s",
+                      best_sim, video_title[:40], best.title[:40])
 
     if attached:
         log.info("Attached %d C-SPAN video URLs to hearings", attached)
+    unmatched = len(cspan_videos) - attached
+    if unmatched:
+        log.debug("  %d C-SPAN videos unmatched", unmatched)
 
 
 if __name__ == "__main__":
