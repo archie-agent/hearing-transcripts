@@ -15,6 +15,7 @@
       "drupal_links": "Senate Drupal announcement-style: links with /YYYY/M/ date in URL (Commerce, Energy, Veterans)",
       "wordpress_blog": "WordPress blog: article.et_pb_post (Senate Intelligence)",
       "wordpress_elementor": "WordPress + Elementor + JetEngine: jet-listing-grid (HSGAC, Indian Affairs)",
+      "generic_links": "Fallback link extractor for JS-rendered pages: finds links with nearby date context (Energy & Commerce, Agriculture, Small Business, Transportation, Natural Resources)",
       "youtube_only": "No scrapeable website; rely on YouTube channel only"
     }
   },
@@ -52,10 +53,10 @@
       "youtube": "https://www.youtube.com/energyandcommerce",
       "website": "https://energycommerce.house.gov",
       "hearings_url": "https://energycommerce.house.gov/calendars",
-      "scraper_type": "youtube_only",
-      "scrapeable": false,
+      "scraper_type": "generic_links",
+      "scrapeable": true,
       "requires_js": true,
-      "notes": "Next.js SPA; calendar items JS-rendered; YouTube only"
+      "notes": "Next.js SPA; calendar items JS-rendered; scraped via Chrome CDP"
     },
     "house.budget": {
       "name": "House Budget",
@@ -91,10 +92,10 @@
       "youtube": "https://www.youtube.com/user/AgRepublicans",
       "website": "https://agriculture.house.gov",
       "hearings_url": "https://agriculture.house.gov/calendar/?Timeframe=All",
-      "scraper_type": "youtube_only",
-      "scrapeable": false,
+      "scraper_type": "generic_links",
+      "scrapeable": true,
       "requires_js": true,
-      "notes": "Calendar content JS-rendered"
+      "notes": "Calendar content JS-rendered; scraped via Chrome CDP"
     },
     "house.foreign_affairs": {
       "name": "House Foreign Affairs",
@@ -129,9 +130,10 @@
       "youtube": "https://youtube.com/SmallBizRepublicans",
       "website": "https://smallbusiness.house.gov",
       "hearings_url": "https://smallbusiness.house.gov/calendar/",
-      "scraper_type": "youtube_only",
-      "scrapeable": false,
-      "requires_js": true
+      "scraper_type": "generic_links",
+      "scrapeable": true,
+      "requires_js": true,
+      "notes": "JS-rendered calendar; scraped via Chrome CDP"
     },
     "house.transportation": {
       "name": "House Transportation and Infrastructure",
@@ -141,9 +143,10 @@
       "youtube": "https://www.youtube.com/Transport",
       "website": "https://transportation.house.gov",
       "hearings_url": "https://transportation.house.gov/calendar/",
-      "scraper_type": "youtube_only",
-      "scrapeable": false,
-      "requires_js": true
+      "scraper_type": "generic_links",
+      "scrapeable": true,
+      "requires_js": true,
+      "notes": "JS-rendered calendar; scraped via Chrome CDP"
     },
     "house.oversight": {
       "name": "House Oversight and Accountability",
@@ -218,9 +221,10 @@
       "youtube": "https://www.youtube.com/user/NaturalResourcesGOP",
       "website": "https://naturalresources.house.gov",
       "hearings_url": "https://naturalresources.house.gov/calendar/",
-      "scraper_type": "youtube_only",
-      "scrapeable": false,
-      "requires_js": true
+      "scraper_type": "generic_links",
+      "scrapeable": true,
+      "requires_js": true,
+      "notes": "JS-rendered calendar; scraped via Chrome CDP"
     },
     "house.veterans_affairs": {
       "name": "House Veterans' Affairs",

@@ -18,6 +18,7 @@ import httpx
 
 import config
 import scrapers
+from detail_scraper import scrape_hearing_detail
 
 log = logging.getLogger(__name__)
 
@@ -183,7 +184,24 @@ def discover_website(committee_key: str, meta: dict, days: int = 1) -> list[Hear
     """Scrape a committee's hearings page using the appropriate scraper."""
     hearings_url = meta.get("hearings_url")
     scraper_type = meta.get("scraper_type", "youtube_only")
+    cutoff = datetime.now() - timedelta(days=days)
 
+    # JS-rendered committees: use the Chrome browser via CDP
+    if meta.get("requires_js", False) and hearings_url:
+        base_url = hearings_url
+        scraped = scrapers.scrape_js_rendered(hearings_url, scraper_type, base_url, cutoff)
+        hearings = []
+        for s in scraped:
+            hearings.append(Hearing(
+                committee_key=committee_key,
+                committee_name=meta.get("name", committee_key),
+                title=s.title,
+                date=s.date,
+                sources={"website_url": s.url},
+            ))
+        return hearings
+
+    # Normal static HTML path
     if not hearings_url or scraper_type == "youtube_only":
         return []
     if not meta.get("scrapeable", False):
@@ -193,7 +211,6 @@ def discover_website(committee_key: str, meta: dict, days: int = 1) -> list[Hear
     if not resp:
         return []
 
-    cutoff = datetime.now() - timedelta(days=days)
     base_url = str(resp.url)
 
     scraped = scrapers.scrape_website(scraper_type, resp.text, base_url, cutoff)
@@ -218,19 +235,151 @@ def discover_website(committee_key: str, meta: dict, days: int = 1) -> list[Hear
 # Map GovInfo committee codes to our committee keys
 _GOVINFO_CODE_MAP: dict[str, str] = {}
 
+# Map normalized name fragments to committee keys for title-based matching.
+# Multiple committees can share a fragment (e.g., "judiciary" maps to both
+# house.judiciary and senate.judiciary), so values are lists.
+_GOVINFO_NAME_MAP: dict[str, list[str]] = {}
+
 def _build_govinfo_map() -> None:
-    """Build mapping from GovInfo package codes to committee keys."""
-    global _GOVINFO_CODE_MAP
+    """Build mapping from GovInfo package codes and name fragments to committee keys."""
+    global _GOVINFO_CODE_MAP, _GOVINFO_NAME_MAP
     for key, meta in config.COMMITTEES.items():
         code = meta.get("code", "")
         if code:
             _GOVINFO_CODE_MAP[code] = key
+
+        # Build name fragment lookup for title-based matching.
+        # From "House Ways and Means" we extract "ways and means",
+        # from "Senate Banking" we extract "banking", etc.
+        name = meta.get("name", "")
+        chamber = meta.get("chamber", "")
+        if name and chamber:
+            # Strip chamber prefix and normalize
+            stripped = name
+            for prefix in ("House ", "Senate "):
+                if stripped.startswith(prefix):
+                    stripped = stripped[len(prefix):]
+                    break
+            # Store the lowered fragment -> [keys]
+            fragment = stripped.lower().strip()
+            if fragment:
+                _GOVINFO_NAME_MAP.setdefault(fragment, []).append(key)
+
+
+def _map_govinfo_to_committee(title: str, chamber: str) -> str | None:
+    """Try to extract a committee key from a GovInfo package title.
+
+    Searches for known committee name fragments in the title text.
+    GovInfo titles often contain phrases like:
+      "HEARING BEFORE THE COMMITTEE ON WAYS AND MEANS"
+      "COMMITTEE ON FINANCE--UNITED STATES SENATE"
+      "COMMITTEE ON BANKING, HOUSING, AND URBAN AFFAIRS"
+
+    Returns the committee_key if a match is found, None otherwise.
+    """
+    if not _GOVINFO_NAME_MAP:
+        _build_govinfo_map()
+
+    title_upper = title.upper()
+
+    # Try to find "COMMITTEE ON <name>" pattern first
+    committee_on_match = re.search(
+        r"COMMITTEE\s+ON\s+(.+?)(?:\s*[-\u2014,]\s*(?:UNITED\s+STATES|U\.S\.)|$)",
+        title_upper,
+    )
+    search_text = committee_on_match.group(1).strip() if committee_on_match else title_upper
+
+    # Strip leading "THE "
+    search_text_no_article = re.sub(r"^THE\s+", "", search_text, flags=re.IGNORECASE)
+
+    # Build candidate list
+    candidates = [search_text_no_article]
+    if search_text_no_article != search_text:
+        candidates.append(search_text)
+    if search_text != title_upper:
+        candidates.append(title_upper)
+
+    # Filter to only committees matching the detected chamber
+    chamber_prefix = f"{chamber}." if chamber and chamber != "unknown" else ""
+
+    # Try longest fragments first for best specificity
+    sorted_fragments = sorted(_GOVINFO_NAME_MAP.keys(), key=len, reverse=True)
+
+    for candidate in candidates:
+        candidate_lower = candidate.lower()
+        for fragment in sorted_fragments:
+            if fragment not in candidate_lower:
+                continue
+            keys = _GOVINFO_NAME_MAP[fragment]
+            for key in keys:
+                if chamber_prefix and not key.startswith(chamber_prefix):
+                    continue
+                return key
+
+    return None
+
+
+def _fetch_govinfo_committee(package_id: str) -> str | None:
+    """Fetch the GovInfo package summary and try to extract a committee key.
+
+    Makes an additional API call to the summary endpoint to get committee metadata.
+    Only called when GOVINFO_FETCH_DETAILS=true (default false) and title-based
+    mapping failed.
+
+    Returns the committee_key if found, None otherwise.
+    """
+    if not _GOVINFO_NAME_MAP:
+        _build_govinfo_map()
+
+    url = (
+        f"https://api.govinfo.gov/packages/{package_id}/summary"
+        f"?api_key={config.GOVINFO_API_KEY}"
+    )
+    resp = _http_get(url, timeout=20)
+    if not resp:
+        return None
+
+    try:
+        data = resp.json()
+    except Exception:
+        log.warning("GovInfo summary for %s returned non-JSON", package_id)
+        return None
+
+    # Detect chamber from packageId
+    pkg_lower = package_id.lower()
+    if "hhrg" in pkg_lower:
+        chamber = "house"
+    elif "shrg" in pkg_lower:
+        chamber = "senate"
+    else:
+        chamber = "unknown"
+
+    # Check for "committees" field in the summary JSON
+    committees = data.get("committees", [])
+    if committees:
+        for entry in committees:
+            name = entry if isinstance(entry, str) else entry.get("committeeName", "")
+            if name:
+                mapped = _map_govinfo_to_committee(name, chamber)
+                if mapped:
+                    return mapped
+
+    # Fallback: try the title from the summary
+    summary_title = data.get("title", "")
+    if summary_title:
+        mapped = _map_govinfo_to_committee(summary_title, chamber)
+        if mapped:
+            return mapped
+
+    return None
 
 
 def discover_govinfo(days: int = 7) -> list[Hearing]:
     """Poll GovInfo API for recently published hearing transcripts."""
     if not _GOVINFO_CODE_MAP:
         _build_govinfo_map()
+
+    fetch_details = os.environ.get("GOVINFO_FETCH_DETAILS", "false").lower() == "true"
 
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
     url = (
@@ -255,9 +404,7 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
         date_issued = pkg.get("dateIssued", "")[:10]
         title = pkg.get("title", pkg_id)
 
-        # Try to map to a specific committee via the package ID
-        # Package IDs look like CHRG-119hhrg12345 or CHRG-119shrg54321
-        committee_key = None
+        # Detect chamber from package ID
         if "hhrg" in pkg_id.lower():
             chamber = "house"
         elif "shrg" in pkg_id.lower():
@@ -265,13 +412,27 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
         else:
             chamber = "unknown"
 
-        # If we can't map to a specific committee, use a generic key
+        # Step 1: Try title-based mapping (no extra API calls)
+        committee_key = _map_govinfo_to_committee(title, chamber)
+
+        # Step 2: If title mapping failed and detail fetching is enabled, try summary
+        if not committee_key and fetch_details:
+            committee_key = _fetch_govinfo_committee(pkg_id)
+
+        # Step 3: Fall back to generic chamber key
         if not committee_key:
             committee_key = f"govinfo.{chamber}"
 
+        # Resolve committee name from config if we have a real key
+        committee_meta = config.COMMITTEES.get(committee_key)
+        if committee_meta:
+            committee_name = committee_meta.get("name", committee_key)
+        else:
+            committee_name = f"{chamber.title()} (via GovInfo)"
+
         hearings.append(Hearing(
             committee_key=committee_key,
-            committee_name=f"{chamber.title()} (via GovInfo)",
+            committee_name=committee_name,
             title=title,
             date=date_issued,
             sources={"govinfo_package_id": pkg_id},
@@ -343,9 +504,26 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None) -> li
     except Exception as e:
         log.warning("GovInfo discovery failed: %s", e)
 
-    # Deduplicate
+    # Deduplicate (same committee key)
     deduped = _deduplicate(all_hearings)
+    # Cross-committee dedup (different keys, same hearing)
+    deduped = _cross_committee_dedup(deduped)
     log.info("Total hearings: %d (deduped from %d)", len(deduped), len(all_hearings))
+
+    # After dedup, enrich with testimony PDFs
+    for hearing in deduped:
+        website_url = hearing.sources.get("website_url")
+        if not website_url:
+            continue
+        meta = committees.get(hearing.committee_key, {})
+        if not meta.get("has_testimony", False) and not meta.get("scrapeable", False):
+            continue
+        try:
+            pdf_urls = scrape_hearing_detail(hearing.committee_key, website_url, meta)
+            if pdf_urls:
+                hearing.sources["testimony_pdf_urls"] = pdf_urls
+        except Exception as e:
+            log.warning("PDF extraction failed for %s: %s", website_url, e)
 
     return deduped
 
@@ -372,6 +550,115 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
             merged[dedup_key] = h
 
     return list(merged.values())
+
+
+# ---------------------------------------------------------------------------
+# Cross-committee deduplication (joint hearings & YouTube/GovInfo duplicates)
+# ---------------------------------------------------------------------------
+
+_CROSS_DEDUP_THRESHOLD = 0.4
+
+
+def _title_similarity(title_a: str, title_b: str) -> float:
+    """Jaccard similarity of word tokens between two titles."""
+    words_a = set(re.sub(r"[^a-z0-9\s]", "", title_a.lower()).split())
+    words_b = set(re.sub(r"[^a-z0-9\s]", "", title_b.lower()).split())
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
+def _chamber_from_key(committee_key: str) -> str:
+    """Extract chamber (house/senate) from a committee key."""
+    parts = committee_key.split(".")
+    # For govinfo keys like "govinfo.house" or "govinfo.senate", chamber is the second part.
+    if parts[0] == "govinfo":
+        return parts[1] if len(parts) > 1 else "unknown"
+    # For regular keys like "house.judiciary" or "senate.finance", chamber is the first part.
+    return parts[0]
+
+
+def _is_specific_key(committee_key: str) -> bool:
+    """Return True if the committee key refers to a real committee (not a generic govinfo fallback)."""
+    if committee_key.startswith("govinfo."):
+        return False
+    return committee_key in config.COMMITTEES
+
+
+def _preferred_key(key_a: str, key_b: str) -> str:
+    """Return whichever committee key is more specific / preferred for merging."""
+    a_specific = _is_specific_key(key_a)
+    b_specific = _is_specific_key(key_b)
+    if a_specific and not b_specific:
+        return key_a
+    if b_specific and not a_specific:
+        return key_b
+    # Both specific or both generic -- prefer the one in config.COMMITTEES
+    if key_a in config.COMMITTEES:
+        return key_a
+    return key_b
+
+
+def _cross_committee_dedup(hearings: list[Hearing]) -> list[Hearing]:
+    """Catch duplicates across different committee keys within the same chamber and date.
+
+    This handles cases where the same hearing is discovered from multiple sources
+    with different committee_keys (e.g. YouTube with a specific key vs GovInfo
+    with a generic 'govinfo.house' key).
+    """
+    # Group by date
+    by_date: dict[str, list[Hearing]] = {}
+    for h in hearings:
+        by_date.setdefault(h.date, []).append(h)
+
+    result: list[Hearing] = []
+
+    for date, group in by_date.items():
+        if len(group) < 2:
+            result.extend(group)
+            continue
+
+        # Track which indices have been merged away
+        merged_into: dict[int, int] = {}  # index -> index it was merged into
+
+        for i in range(len(group)):
+            if i in merged_into:
+                continue
+            for j in range(i + 1, len(group)):
+                if j in merged_into:
+                    continue
+
+                h_i = group[i]
+                h_j = group[j]
+
+                # Skip if same committee key (already handled by _deduplicate)
+                if h_i.committee_key == h_j.committee_key:
+                    continue
+
+                # Skip cross-chamber comparisons
+                chamber_i = _chamber_from_key(h_i.committee_key)
+                chamber_j = _chamber_from_key(h_j.committee_key)
+                if chamber_i != chamber_j:
+                    continue
+
+                # Compare titles
+                sim = _title_similarity(h_i.title, h_j.title)
+                if sim > _CROSS_DEDUP_THRESHOLD:
+                    # Merge j into i
+                    winner_key = _preferred_key(h_i.committee_key, h_j.committee_key)
+                    if winner_key == h_j.committee_key:
+                        h_i.committee_key = h_j.committee_key
+                        h_i.committee_name = h_j.committee_name
+                    h_i.sources.update(h_j.sources)
+                    if len(h_j.title) > len(h_i.title):
+                        h_i.title = h_j.title
+                    merged_into[j] = i
+
+        for i, h in enumerate(group):
+            if i not in merged_into:
+                result.append(h)
+
+    return result
 
 
 if __name__ == "__main__":

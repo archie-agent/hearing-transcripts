@@ -650,3 +650,141 @@ def scrape_website(scraper_type: str, html: str, base_url: str, cutoff: datetime
     except Exception as e:
         log.warning("Scraper %s failed: %s", scraper_type, e)
         return []
+
+
+# ---------------------------------------------------------------------------
+# Generic link extractor — fallback for JS-rendered pages with no
+# specific scraper or when the designated scraper returns nothing.
+# Looks for links containing "hearing" with nearby date text.
+# ---------------------------------------------------------------------------
+
+def scrape_generic_links(html: str, base_url: str, cutoff: datetime) -> list[ScrapedHearing]:
+    """Extract hearing links from any page by looking for links with date context."""
+    soup = BeautifulSoup(html, "lxml")
+    results = []
+    seen_urls = set()
+
+    for link in soup.find_all("a", href=True):
+        href = link.get("href", "")
+        title = link.get_text(strip=True)
+        if not title or len(title) < 15:
+            continue
+        # Skip obviously non-hearing links
+        if any(skip in title.lower() for skip in [
+            "next", "previous", "page", "more", "login", "sign in",
+            "contact", "about", "home", "search",
+        ]):
+            continue
+
+        abs_href = _abs_url(href, base_url)
+        if abs_href in seen_urls:
+            continue
+
+        # Try to find a date in surrounding context
+        hearing_date = None
+
+        # Check the link's parent for date text
+        parent = link.parent
+        if parent:
+            hearing_date = parse_date(parent.get_text(" ", strip=True))
+
+        # Walk up a few levels if needed
+        if not hearing_date and parent:
+            grandparent = parent.parent
+            if grandparent:
+                hearing_date = parse_date(grandparent.get_text(" ", strip=True))
+
+        # Check for time elements nearby
+        if not hearing_date:
+            container = link.parent
+            for _ in range(3):
+                if container is None:
+                    break
+                time_el = container.find("time", attrs={"datetime": True})
+                if time_el:
+                    hearing_date = parse_date(time_el.get("datetime", ""))
+                    break
+                container = container.parent
+
+        if not hearing_date or not _is_recent(hearing_date, cutoff):
+            continue
+
+        seen_urls.add(abs_href)
+        results.append(ScrapedHearing(
+            title=title,
+            date=hearing_date,
+            url=abs_href,
+        ))
+
+    return results
+
+
+SCRAPER_REGISTRY["generic_links"] = scrape_generic_links
+
+
+# ---------------------------------------------------------------------------
+# JS-rendered page scraper — connects to clawdbot Chrome via CDP
+# ---------------------------------------------------------------------------
+
+_CDP_URL = "http://127.0.0.1:18800"
+
+
+def scrape_js_rendered(
+    hearings_url: str,
+    scraper_type: str,
+    base_url: str,
+    cutoff: datetime,
+) -> list[ScrapedHearing]:
+    """Fetch a JS-rendered page via the clawdbot Chrome browser and scrape it.
+
+    Connects to the running Chrome instance via CDP on port 18800, navigates
+    to hearings_url, waits for JS to render, then passes the rendered HTML
+    to the appropriate scraper function.
+
+    Falls back gracefully (returns []) if the browser is not running.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        log.warning("playwright not installed; cannot scrape JS-rendered page: %s", hearings_url)
+        return []
+
+    pw = None
+    browser = None
+    page = None
+    try:
+        pw = sync_playwright().start()
+        browser = pw.chromium.connect_over_cdp(_CDP_URL)
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = context.new_page()
+
+        log.info("JS scraper: navigating to %s", hearings_url)
+        page.goto(hearings_url, timeout=30000)
+        page.wait_for_timeout(6000)
+        html = page.content()
+
+    except Exception as e:
+        log.warning("JS scraper: browser connection failed for %s: %s", hearings_url, e)
+        return []
+    finally:
+        if page:
+            try:
+                page.close()
+            except Exception:
+                pass
+        # Do NOT close the browser — it's the shared clawdbot instance
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+    # Dispatch to the designated scraper
+    results = scrape_website(scraper_type, html, base_url, cutoff)
+
+    # If the designated scraper found nothing, try the generic link extractor
+    if not results and scraper_type != "generic_links":
+        log.info("JS scraper: %s returned 0 results, trying generic_links", scraper_type)
+        results = scrape_generic_links(html, base_url, cutoff)
+
+    return results
