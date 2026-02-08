@@ -304,20 +304,20 @@ def main():
         active = config.get_committees()  # default: tier <= 2
 
     max_cost = args.max_cost or config.MAX_COST_PER_RUN
+    state = State()
     log.info(
         "Run %s: monitoring %d committees, looking back %d day(s), max cost $%.2f",
         run_id, len(active), args.days, max_cost,
     )
 
-    # Discover — pass committees dict directly, no global mutation
-    hearings = discover_all(days=args.days, committees=active)
+    # Discover — pass committees dict and state (for C-SPAN rotation tracking)
+    hearings = discover_all(days=args.days, committees=active, state=state)
 
     if not hearings:
         log.info("No new hearings found.")
         return
 
     # Filter out already-processed hearings (unless --reprocess)
-    state = State()
     if args.reprocess:
         new_hearings = hearings
     else:

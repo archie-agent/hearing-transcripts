@@ -82,6 +82,14 @@ class State:
                 )
             """)
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cspan_searches (
+                    committee_key TEXT PRIMARY KEY,
+                    last_searched TEXT,
+                    last_result_count INTEGER DEFAULT 0
+                )
+            """)
+
             conn.commit()
         finally:
             conn.close()
@@ -334,5 +342,72 @@ class State:
                 hearings.append(hearing)
 
             return hearings
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # C-SPAN search rotation tracking
+    # ------------------------------------------------------------------
+
+    def get_cspan_search_age(self, committee_key: str) -> int | None:
+        """Days since last C-SPAN search for this committee. None = never searched."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                "SELECT last_searched FROM cspan_searches WHERE committee_key = ?",
+                (committee_key,),
+            )
+            row = cursor.fetchone()
+            if row is None or row["last_searched"] is None:
+                return None
+            last = datetime.fromisoformat(row["last_searched"])
+            now = datetime.now(timezone.utc)
+            # Handle naive datetimes from older records
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            return (now - last).days
+        finally:
+            conn.close()
+
+    def record_cspan_search(self, committee_key: str, result_count: int) -> None:
+        """Record that a C-SPAN search was done for this committee."""
+        conn = self._get_conn()
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute("""
+                INSERT INTO cspan_searches (committee_key, last_searched, last_result_count)
+                VALUES (?, ?, ?)
+                ON CONFLICT(committee_key) DO UPDATE
+                SET last_searched = excluded.last_searched,
+                    last_result_count = excluded.last_result_count
+            """, (committee_key, now, result_count))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_stale_committees(self, max_age_days: int = 3) -> list[str]:
+        """Committees not searched in the last N days, ordered oldest first.
+
+        Returns committee keys that either have never been searched or
+        were last searched more than max_age_days ago.
+        """
+        conn = self._get_conn()
+        try:
+            # Get committees that HAVE been searched but are stale
+            cursor = conn.execute("""
+                SELECT committee_key, last_searched
+                FROM cspan_searches
+                ORDER BY last_searched ASC
+            """)
+            stale = []
+            now = datetime.now(timezone.utc)
+            for row in cursor.fetchall():
+                last = datetime.fromisoformat(row["last_searched"])
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                age = (now - last).days
+                if age >= max_age_days:
+                    stale.append(row["committee_key"])
+            return stale
         finally:
             conn.close()

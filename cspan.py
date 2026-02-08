@@ -42,19 +42,31 @@ def _rate_limit(domain: str = "www.c-span.org") -> None:
 
 _MAX_CSPAN_SEARCHES = 12  # stay under WAF captcha threshold (~15 pages/session)
 
+# Batch cooldown: pause between groups of searches to look more human-like
+BATCH_SIZE = 4
+BATCH_COOLDOWN = 60  # seconds between batches
+
 
 def discover_cspan(committees: dict, days: int = 7,
-                    active_keys: set[str] | None = None) -> list[dict]:
-    """Search C-SPAN for recent hearing videos per committee.
+                    active_keys: set[str] | None = None,
+                    state=None) -> list[dict]:
+    """Search C-SPAN for recent hearing videos using a 3-layer strategy.
 
-    Uses per-committee search with sponsorid filter, sorted by tier so
-    the most important committees are searched first. Caps at _MAX_CSPAN_SEARCHES
-    to stay under C-SPAN's aggressive CloudFront WAF threshold.
+    Layer 1: Broad search (1 WAF slot) — unfiltered search for recent hearings
+             across all committees.
+    Layer 2: Targeted search — per-committee search only for committees with
+             known unmatched hearings (from active_keys not covered by Layer 1).
+    Layer 3: Rotation — search stale committees (not searched recently) to
+             ensure all 36 committees get checked every ~3 days.
+
+    Intra-run cooldown batching: every BATCH_SIZE pages, pause BATCH_COOLDOWN
+    seconds to spread requests and look more human-like.
 
     Args:
         committees: Full committee dict from config
         days: How many days back to search
-        active_keys: If provided, only search these committee keys.
+        active_keys: If provided, committees with known hearings needing C-SPAN match.
+        state: Optional State instance for rotation tracking (Layer 3).
 
     Returns:
         [{title, date, url, program_id}, ...] — flat list.
@@ -64,23 +76,10 @@ def discover_cspan(committees: dict, days: int = 7,
         (key, meta) for key, meta in committees.items()
         if meta.get("cspan_id")
     ]
-    if active_keys is not None:
-        cspan_committees = [
-            (key, meta) for key, meta in cspan_committees
-            if key in active_keys
-        ]
 
     if not cspan_committees:
         log.info("No committees to check on C-SPAN")
         return []
-
-    # Sort by tier (lower = higher priority) so we search important ones first
-    cspan_committees.sort(key=lambda x: x[1].get("tier", 99))
-    # Cap to avoid WAF
-    if len(cspan_committees) > _MAX_CSPAN_SEARCHES:
-        log.info("C-SPAN: capping from %d to %d committees (WAF limit)",
-                 len(cspan_committees), _MAX_CSPAN_SEARCHES)
-        cspan_committees = cspan_committees[:_MAX_CSPAN_SEARCHES]
 
     try:
         from playwright.sync_api import sync_playwright
@@ -90,32 +89,42 @@ def discover_cspan(committees: dict, days: int = 7,
 
     cutoff = datetime.now() - timedelta(days=days)
 
-    log.info("C-SPAN discovery: searching %d committees (by tier)",
-             len(cspan_committees))
-
     all_results: list[dict] = []
     seen_ids: set[str] = set()
+    pages_loaded = 0
+    waf_blocked = False
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(user_agent=_UA)
         page = context.new_page()
-        pages_loaded = 0
-        consecutive_empty = 0
 
-        for key, meta in cspan_committees:
-            # Rotate context every 5 pages
+        def _rotate_context_if_needed():
+            nonlocal context, page, pages_loaded
             if pages_loaded > 0 and pages_loaded % 5 == 0:
                 context.close()
                 context = browser.new_context(user_agent=_UA)
                 page = context.new_page()
                 log.debug("C-SPAN: rotated browser context after %d pages", pages_loaded)
 
-            cspan_id = meta["cspan_id"]
-            search_url = (
-                f"https://www.c-span.org/search/?query=&searchtype=Videos"
-                f"&sponsorid%5B%5D={cspan_id}&sort=Most+Recent+Event"
-            )
+        def _batch_cooldown_if_needed():
+            nonlocal pages_loaded
+            if pages_loaded > 0 and pages_loaded % BATCH_SIZE == 0:
+                log.info("C-SPAN: batch cooldown (%ds) after %d pages",
+                         BATCH_COOLDOWN, pages_loaded)
+                _time.sleep(BATCH_COOLDOWN)
+
+        def _search_page(search_url: str, label: str) -> list[dict]:
+            """Load a C-SPAN search URL and return parsed results.
+
+            Returns parsed hearings list, or empty list on failure.
+            Sets nonlocal waf_blocked=True if WAF captcha detected and
+            retry fails.
+            """
+            nonlocal pages_loaded, waf_blocked, context, page, browser
+
+            _rotate_context_if_needed()
+            _batch_cooldown_if_needed()
             _rate_limit()
 
             try:
@@ -123,11 +132,11 @@ def discover_cspan(committees: dict, days: int = 7,
                 page.wait_for_timeout(7000)
                 pages_loaded += 1
 
-                # WAF detection: explicit captcha — retry once with cooldown
+                # WAF detection
                 body_text = (page.inner_text("body") or "")[:300]
                 if "confirm you are human" in body_text.lower():
                     log.warning("C-SPAN WAF captcha at page %d (%s), "
-                                "retrying with 60s cooldown...", pages_loaded, key)
+                                "retrying with 60s cooldown...", pages_loaded, label)
                     context.close()
                     browser.close()
                     _time.sleep(60)
@@ -144,40 +153,170 @@ def discover_cspan(committees: dict, days: int = 7,
                         log.warning("C-SPAN WAF still active after cooldown, "
                                     "aborting (collected %d hearings)",
                                     len(all_results))
-                        break
+                        waf_blocked = True
+                        return []
 
-                # Parse results
-                raw_links = page.query_selector_all("a[href*='/program/']")
-                hearings = _parse_search_results(page, cutoff)
-                new = 0
-                for h in hearings:
-                    if h["program_id"] not in seen_ids:
-                        seen_ids.add(h["program_id"])
-                        h["committee_key"] = key  # attribute to searched committee
-                        all_results.append(h)
-                        new += 1
-
-                if new:
-                    consecutive_empty = 0
-                    log.info("  C-SPAN %s: %d hearings found", key, new)
-                else:
-                    consecutive_empty += 1
-                    log.debug("  C-SPAN %s: no recent hearings (links=%d)",
-                              key, len(raw_links))
-                    # Silent WAF: page loads but no links rendered
-                    if consecutive_empty >= 3 and len(raw_links) == 0:
-                        log.warning("C-SPAN: %d consecutive empty pages — "
-                                    "likely WAF silent block, aborting",
-                                    consecutive_empty)
-                        break
+                return _parse_search_results(page, cutoff)
 
             except Exception as e:
-                log.warning("C-SPAN discovery failed for %s: %s", key, e)
+                log.warning("C-SPAN search failed for %s: %s", label, e)
                 pages_loaded += 1
+                return []
+
+        # ---------------------------------------------------------------
+        # Layer 1: Broad search (1 WAF slot — all committees)
+        # ---------------------------------------------------------------
+        log.info("C-SPAN Layer 1: broad search (all committees)")
+        broad_url = (
+            "https://www.c-span.org/search/?query=&searchtype=Videos"
+            "&sort=Most+Recent+Event"
+        )
+        broad_hearings = _search_page(broad_url, "broad")
+        covered_committees: set[str] = set()
+
+        if not waf_blocked:
+            for h in broad_hearings:
+                if h["program_id"] not in seen_ids:
+                    seen_ids.add(h["program_id"])
+                    # Broad results have no committee_key — set to None
+                    h["committee_key"] = None
+                    all_results.append(h)
+
+            log.info("C-SPAN Layer 1: %d hearings from broad search", len(broad_hearings))
+
+        # ---------------------------------------------------------------
+        # Layer 2: Targeted per-committee search (unmatched active committees)
+        # ---------------------------------------------------------------
+        if not waf_blocked and active_keys:
+            # Only search committees that have known hearings needing C-SPAN URLs
+            # AND weren't covered by broad results (we can't tell from broad results
+            # which committees they cover since they lack committee_key, but we can
+            # check after matching — for now, search active committees with budget)
+            targeted = [
+                (key, meta) for key, meta in cspan_committees
+                if key in active_keys
+            ]
+            # Sort by tier
+            targeted.sort(key=lambda x: x[1].get("tier", 99))
+
+            remaining_budget = _MAX_CSPAN_SEARCHES - pages_loaded
+            if len(targeted) > remaining_budget:
+                log.info("C-SPAN Layer 2: capping targeted from %d to %d (budget)",
+                         len(targeted), remaining_budget)
+                targeted = targeted[:remaining_budget]
+
+            if targeted:
+                log.info("C-SPAN Layer 2: targeted search for %d active committees",
+                         len(targeted))
+                consecutive_empty = 0
+
+                for key, meta in targeted:
+                    if waf_blocked:
+                        break
+                    if pages_loaded >= _MAX_CSPAN_SEARCHES:
+                        log.info("C-SPAN: WAF budget exhausted at %d pages", pages_loaded)
+                        break
+
+                    cspan_id = meta["cspan_id"]
+                    search_url = (
+                        f"https://www.c-span.org/search/?query=&searchtype=Videos"
+                        f"&sponsorid%5B%5D={cspan_id}&sort=Most+Recent+Event"
+                    )
+                    hearings = _search_page(search_url, key)
+                    if waf_blocked:
+                        break
+
+                    new = 0
+                    for h in hearings:
+                        if h["program_id"] not in seen_ids:
+                            seen_ids.add(h["program_id"])
+                            h["committee_key"] = key
+                            all_results.append(h)
+                            new += 1
+
+                    covered_committees.add(key)
+                    if state:
+                        state.record_cspan_search(key, new)
+
+                    if new:
+                        consecutive_empty = 0
+                        log.info("  C-SPAN %s: %d hearings found", key, new)
+                    else:
+                        consecutive_empty += 1
+                        log.debug("  C-SPAN %s: no recent hearings", key)
+                        if consecutive_empty >= 3:
+                            raw_links = page.query_selector_all("a[href*='/program/']")
+                            if len(raw_links) == 0:
+                                log.warning("C-SPAN: %d consecutive empty pages — "
+                                            "likely WAF silent block, aborting",
+                                            consecutive_empty)
+                                break
+
+        # ---------------------------------------------------------------
+        # Layer 3: Stale committee rotation (fill remaining budget)
+        # ---------------------------------------------------------------
+        if not waf_blocked and state:
+            remaining_budget = _MAX_CSPAN_SEARCHES - pages_loaded
+            if remaining_budget > 0:
+                stale_keys = state.get_stale_committees(max_age_days=3)
+                # Also include committees never searched
+                all_cspan_keys = {key for key, meta in cspan_committees}
+                searched_keys = set(stale_keys) | covered_committees
+                # Find never-searched committees
+                never_searched = [
+                    key for key in all_cspan_keys
+                    if key not in covered_committees
+                    and state.get_cspan_search_age(key) is None
+                ]
+                # Combine: never-searched first, then stale (oldest first)
+                rotation_queue = never_searched + [
+                    k for k in stale_keys if k not in covered_committees
+                ]
+                rotation_queue = rotation_queue[:remaining_budget]
+
+                if rotation_queue:
+                    log.info("C-SPAN Layer 3: rotating %d stale/unsearched committees",
+                             len(rotation_queue))
+                    # Build lookup for committee metadata
+                    cspan_meta = {key: meta for key, meta in cspan_committees}
+
+                    for key in rotation_queue:
+                        if waf_blocked:
+                            break
+                        if pages_loaded >= _MAX_CSPAN_SEARCHES:
+                            log.info("C-SPAN: WAF budget exhausted at %d pages",
+                                     pages_loaded)
+                            break
+
+                        meta = cspan_meta.get(key)
+                        if not meta:
+                            continue
+                        cspan_id = meta["cspan_id"]
+                        search_url = (
+                            f"https://www.c-span.org/search/?query=&searchtype=Videos"
+                            f"&sponsorid%5B%5D={cspan_id}&sort=Most+Recent+Event"
+                        )
+                        hearings = _search_page(search_url, f"rotate:{key}")
+                        if waf_blocked:
+                            break
+
+                        new = 0
+                        for h in hearings:
+                            if h["program_id"] not in seen_ids:
+                                seen_ids.add(h["program_id"])
+                                h["committee_key"] = key
+                                all_results.append(h)
+                                new += 1
+
+                        state.record_cspan_search(key, new)
+                        if new:
+                            log.info("  C-SPAN rotate %s: %d hearings found", key, new)
 
         browser.close()
 
-    log.info("C-SPAN discovery: %d hearings from %d pages", len(all_results), pages_loaded)
+    log.info("C-SPAN discovery: %d hearings from %d pages "
+             "(L1=broad, L2=%d targeted, L3=rotation)",
+             len(all_results), pages_loaded, len(covered_committees))
     return all_results
 
 
