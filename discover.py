@@ -561,8 +561,8 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
                     log.debug("  Skipping %s meeting %s: %s", chamber, event_id, status)
                     continue
 
-                title = meeting_detail.get("title", "")
-                if not title:
+                title = (meeting_detail.get("title") or "").strip()
+                if not title or len(title) < 5:
                     continue
 
                 # Parse date
@@ -574,6 +574,9 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
                     date_formatted = date_str[:10]  # YYYY-MM-DD
                     meeting_date = datetime.strptime(date_formatted, "%Y-%m-%d")
                     if meeting_date < cutoff:
+                        continue
+                    # Skip future placeholder entries (date > 30 days out)
+                    if meeting_date > datetime.now() + timedelta(days=30):
                         continue
                 except (ValueError, IndexError):
                     continue
