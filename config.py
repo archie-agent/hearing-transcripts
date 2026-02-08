@@ -24,6 +24,7 @@ COMMITTEES_JSON = DATA_DIR / "committees.json"
 # ---------------------------------------------------------------------------
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GOVINFO_API_KEY = os.environ.get("GOVINFO_API_KEY", "DEMO_KEY")
+CONGRESS_API_KEY = os.environ.get("CONGRESS_API_KEY", GOVINFO_API_KEY)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 if GOVINFO_API_KEY == "DEMO_KEY":

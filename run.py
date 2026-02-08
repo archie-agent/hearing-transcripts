@@ -93,6 +93,32 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
         state.mark_step(hearing.id, "captions", "done")
         state.mark_step(hearing.id, "cleanup", "done")
 
+    # 1.5. C-SPAN broadcast captions
+    cspan_url = hearing.sources.get("cspan_url")
+    if cspan_url:
+        if not state.is_step_done(hearing.id, "cspan"):
+            state.mark_step(hearing.id, "cspan", "running")
+            try:
+                import cspan
+                witnesses = hearing.sources.get("witnesses")
+                transcript_path = cspan.fetch_cspan_transcript(
+                    cspan_url, hearing_dir, witnesses=witnesses,
+                )
+                if transcript_path:
+                    result["outputs"]["cspan_transcript"] = str(transcript_path)
+                    state.mark_step(hearing.id, "cspan_fetched", "done")
+                state.mark_step(hearing.id, "cspan", "done")
+            except ImportError:
+                log.debug("cspan module not available, skipping")
+                state.mark_step(hearing.id, "cspan", "done")
+            except Exception as e:
+                state.mark_step(hearing.id, "cspan", "failed", error=str(e))
+                log.error("C-SPAN caption fetch failed for %s: %s", hearing.id, e)
+        else:
+            log.info("C-SPAN captions already processed for %s", hearing.id)
+    # (If no cspan_url, leave cspan step unmarked so it can be retried
+    # if a URL is discovered on a future run.)
+
     # 2. Testimony PDFs
     pdf_urls = hearing.sources.get("testimony_pdf_urls", [])
     if pdf_urls:
@@ -149,18 +175,32 @@ def _publish_to_transcripts(hearing: Hearing, run_hearing_dir: Path, result: dic
     transcript_dir = config.TRANSCRIPTS_DIR / hearing.committee_key / f"{hearing.date}_{hearing.id}"
     transcript_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine best transcript: cleaned > captions > govinfo
-    audio = result.get("outputs", {}).get("audio", {})
+    # Determine best transcript by priority:
+    #   1. GovInfo official transcript (authoritative, months delayed)
+    #   2. C-SPAN broadcast captions (professional stenographers, immediate)
+    #   3. YouTube + LLM diarized (ASR quality, LLM-improved)
+    #   4. Raw YouTube captions (worst)
     best_transcript = None
-    if isinstance(audio, dict):
-        if audio.get("cleaned_transcript"):
-            best_transcript = Path(audio["cleaned_transcript"])
-        elif audio.get("captions"):
-            best_transcript = Path(audio["captions"])
+
+    # Priority 1: GovInfo official transcript
+    govinfo = result.get("outputs", {}).get("govinfo_transcript")
+    if govinfo:
+        best_transcript = Path(govinfo)
+
+    # Priority 2: C-SPAN broadcast captions
     if best_transcript is None:
-        govinfo = result.get("outputs", {}).get("govinfo_transcript")
-        if govinfo:
-            best_transcript = Path(govinfo)
+        cspan_path = result.get("outputs", {}).get("cspan_transcript")
+        if cspan_path:
+            best_transcript = Path(cspan_path)
+
+    # Priority 3-4: YouTube cleaned or raw captions
+    if best_transcript is None:
+        audio = result.get("outputs", {}).get("audio", {})
+        if isinstance(audio, dict):
+            if audio.get("cleaned_transcript"):
+                best_transcript = Path(audio["cleaned_transcript"])
+            elif audio.get("captions"):
+                best_transcript = Path(audio["captions"])
 
     # Copy best transcript
     if best_transcript and best_transcript.exists():
@@ -185,6 +225,10 @@ def _publish_to_transcripts(hearing: Hearing, run_hearing_dir: Path, result: dic
         "cost": result.get("cost", {}),
         "published_at": datetime.now(timezone.utc).isoformat(),
     }
+    # Include witnesses from congress.gov if available
+    witnesses = hearing.sources.get("witnesses")
+    if witnesses:
+        meta["witnesses"] = witnesses
     (transcript_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
     log.info("Published to %s", transcript_dir)
@@ -275,7 +319,14 @@ def main():
     if args.reprocess:
         new_hearings = hearings
     else:
-        new_hearings = [h for h in hearings if not state.is_processed(h.id)]
+        new_hearings = []
+        for h in hearings:
+            if not state.is_processed(h.id):
+                new_hearings.append(h)
+            elif h.sources.get("cspan_url") and not state.is_step_done(h.id, "cspan_fetched"):
+                # Re-process hearings that gained a C-SPAN URL since last run
+                new_hearings.append(h)
+                log.debug("Re-processing %s: new C-SPAN URL", h.id)
 
     log.info("Found %d hearings (%d new):", len(hearings), len(new_hearings))
     for h in hearings:
@@ -310,12 +361,14 @@ def main():
         has_clean = bool(audio.get("cleaned_transcript")) if isinstance(audio, dict) else False
         n_test = len(r.get("outputs", {}).get("testimony", []))
         has_gov = bool(r.get("outputs", {}).get("govinfo_transcript"))
+        has_cspan = bool(r.get("outputs", {}).get("cspan_transcript"))
         cost_usd = r.get("cost", {}).get("total_usd", 0)
         log.info(
-            "[%d/%d] %s | cap=%s clean=%s testy=%d gov=%s $%.4f",
+            "[%d/%d] %s | cap=%s clean=%s cspan=%s testy=%d gov=%s $%.4f",
             i, n_total, r["title"][:50],
             "Y" if has_cap else "-",
             "Y" if has_clean else "-",
+            "Y" if has_cspan else "-",
             n_test,
             "Y" if has_gov else "-",
             cost_usd,
@@ -429,13 +482,15 @@ def main():
         audio = outputs.get("audio", {})
         has_captions = bool(audio.get("captions")) if isinstance(audio, dict) else False
         has_cleaned = bool(audio.get("cleaned_transcript")) if isinstance(audio, dict) else False
+        has_cspan = bool(outputs.get("cspan_transcript"))
         n_testimony = len(outputs.get("testimony", []))
         has_govinfo = bool(outputs.get("govinfo_transcript"))
         log.info(
-            "  %s | captions=%s cleaned=%s testimony=%d govinfo=%s | $%.4f",
+            "  %s | captions=%s cleaned=%s cspan=%s testimony=%d govinfo=%s | $%.4f",
             r["title"][:50],
             "yes" if has_captions else "no",
             "yes" if has_cleaned else "no",
+            "yes" if has_cspan else "no",
             n_testimony,
             "yes" if has_govinfo else "no",
             r.get("cost", {}).get("total_usd", 0),

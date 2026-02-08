@@ -31,7 +31,7 @@ _YT_DLP_ENV = {**os.environ, "PATH": f"{_VENV_BIN}:{_DENO_DIR}:{os.environ.get('
 
 # Rate limiting: track last request time per domain
 _last_request: dict[str, float] = {}
-_MIN_DELAY = 1.0  # seconds between requests to same domain
+_MIN_DELAY = 1.5  # seconds between requests to same domain (DEMO_KEY: 40 req/min)
 
 
 def _rate_limit(url: str) -> None:
@@ -97,7 +97,7 @@ def _normalize_title(title: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _http_get(url: str, timeout: float = 20.0) -> httpx.Response | None:
-    """Fetch a URL with retries and rate limiting. Returns None on failure."""
+    """Fetch a URL with retries, rate limiting, and 429 backoff. Returns None on failure."""
     _rate_limit(url)
     transport = httpx.HTTPTransport(retries=2)
     try:
@@ -105,6 +105,13 @@ def _http_get(url: str, timeout: float = 20.0) -> httpx.Response | None:
                           follow_redirects=True,
                           headers={"User-Agent": "Mozilla/5.0 (compatible; HearingBot/1.0)"}) as client:
             resp = client.get(url)
+            # Handle 429 Too Many Requests with backoff
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", "5"))
+                retry_after = min(retry_after, 60)  # cap at 60s
+                log.debug("HTTP 429 for %s, waiting %ds", url, retry_after)
+                _time.sleep(retry_after)
+                resp = client.get(url)
             if resp.status_code != 200:
                 log.warning("HTTP %s for %s", resp.status_code, url)
                 return None
@@ -476,6 +483,164 @@ def _fetch_govinfo_committee(package_id: str) -> str | None:
     return None
 
 
+def discover_congress_api(days: int = 7) -> list[Hearing]:
+    """Poll congress.gov committee-meeting API for recent hearings.
+
+    Uses the structured congress.gov API to discover hearings with witness
+    metadata and meeting status. The API's systemCode matches our committee
+    'code' field (e.g., 'ssbk00' for Senate Banking).
+    """
+    api_key = config.CONGRESS_API_KEY
+    congress = config.CONGRESS
+
+    # Build reverse lookup: {systemCode: committee_key}
+    code_to_key: dict[str, str] = {}
+    for key, meta in config.COMMITTEES.items():
+        code = meta.get("code", "")
+        if code:
+            code_to_key[code] = key
+
+    if not code_to_key:
+        log.warning("No committee codes configured, skipping congress.gov API")
+        return []
+
+    cutoff = datetime.now() - timedelta(days=days)
+    from_dt = cutoff.strftime("%Y-%m-%dT00:00:00Z")
+
+    hearings: list[Hearing] = []
+
+    for chamber in ("house", "senate"):
+        offset = 0
+        while True:
+            list_url = (
+                f"https://api.congress.gov/v3/committee-meeting/{congress}/{chamber}"
+                f"?fromDateTime={from_dt}&limit=250&offset={offset}"
+                f"&format=json&api_key={api_key}"
+            )
+            resp = _http_get(list_url, timeout=30)
+            if not resp:
+                break
+
+            try:
+                data = resp.json()
+            except Exception:
+                log.warning("congress.gov API returned non-JSON for %s", chamber)
+                break
+
+            meetings = data.get("committeeMeetings", [])
+            if not meetings:
+                break
+
+            for meeting in meetings:
+                event_id = meeting.get("eventId", "")
+                detail_url = meeting.get("url", "")
+                if not event_id or not detail_url:
+                    continue
+
+                # Fetch detail endpoint for full metadata
+                if "api_key=" not in detail_url:
+                    detail_url += f"&api_key={api_key}" if "?" in detail_url else f"?api_key={api_key}"
+                detail_url += "&format=json" if "format=" not in detail_url else ""
+
+                detail_resp = _http_get(detail_url, timeout=20)
+                if not detail_resp:
+                    continue
+
+                try:
+                    detail = detail_resp.json()
+                except Exception:
+                    continue
+
+                # The detail may be nested under a key or at top level
+                meeting_detail = detail.get("committeeMeeting", detail)
+
+                # Skip canceled/postponed meetings
+                status = meeting_detail.get("meetingStatus", "")
+                if status in ("Canceled", "Postponed"):
+                    log.debug("  Skipping %s meeting %s: %s", chamber, event_id, status)
+                    continue
+
+                title = meeting_detail.get("title", "")
+                if not title:
+                    continue
+
+                # Parse date
+                date_str = meeting_detail.get("date", "")
+                if not date_str:
+                    continue
+                # date is typically ISO format like "2026-02-05T15:00:00Z"
+                try:
+                    date_formatted = date_str[:10]  # YYYY-MM-DD
+                    meeting_date = datetime.strptime(date_formatted, "%Y-%m-%d")
+                    if meeting_date < cutoff:
+                        continue
+                except (ValueError, IndexError):
+                    continue
+
+                # Extract systemCode from committees list.
+                # systemCode can be a subcommittee code like "hsif16" --
+                # try exact match first, then parent committee (first 4 chars + "00").
+                committee_key = None
+                committees_list = meeting_detail.get("committees", [])
+                for comm in committees_list:
+                    sys_code = comm.get("systemCode", "")
+                    if not sys_code:
+                        continue
+                    if sys_code in code_to_key:
+                        committee_key = code_to_key[sys_code]
+                        break
+                    # Try parent committee code (e.g., hsif16 -> hsif00)
+                    parent_code = sys_code[:4] + "00"
+                    if parent_code in code_to_key:
+                        committee_key = code_to_key[parent_code]
+                        break
+
+                if not committee_key:
+                    log.debug("  No matching committee for meeting %s: %s",
+                              event_id, title[:60])
+                    continue
+
+                committee_meta = config.COMMITTEES.get(committee_key, {})
+                committee_name = committee_meta.get("name", committee_key)
+
+                # Extract witnesses
+                witnesses = []
+                for w in meeting_detail.get("witnesses", []):
+                    witness_info = {}
+                    if w.get("name"):
+                        witness_info["name"] = w["name"]
+                    if w.get("position"):
+                        witness_info["position"] = w["position"]
+                    if w.get("organization"):
+                        witness_info["organization"] = w["organization"]
+                    if witness_info:
+                        witnesses.append(witness_info)
+
+                sources: dict = {"congress_api_event_id": event_id}
+                if witnesses:
+                    sources["witnesses"] = witnesses
+
+                hearings.append(Hearing(
+                    committee_key=committee_key,
+                    committee_name=committee_name,
+                    title=title,
+                    date=date_formatted,
+                    sources=sources,
+                ))
+                log.debug("  congress.gov: %s %s %s", date_formatted,
+                          committee_key, title[:60])
+
+            # Pagination
+            pagination = data.get("pagination", {})
+            if pagination.get("next"):
+                offset += 250
+            else:
+                break
+
+    log.info("congress.gov API: %d hearings discovered", len(hearings))
+    return hearings
+
+
 def discover_govinfo(days: int = 7) -> list[Hearing]:
     """Poll GovInfo API for recently published hearing transcripts."""
     if not _GOVINFO_CODE_MAP:
@@ -618,6 +783,15 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None) -> li
     except Exception as e:
         log.warning("GovInfo discovery failed: %s", e)
 
+    # Congress.gov API (structured data with witnesses)
+    try:
+        congress_api = discover_congress_api(days=max(days, 7))
+        if congress_api:
+            log.info("congress.gov API: %d hearings", len(congress_api))
+            all_hearings.extend(congress_api)
+    except Exception as e:
+        log.warning("congress.gov API discovery failed: %s", e)
+
     # Deduplicate (same committee key)
     deduped = _deduplicate(all_hearings)
     # Cross-committee dedup (different keys, same hearing)
@@ -626,6 +800,22 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None) -> li
 
     # Attach YouTube clips to matching website hearings
     _attach_youtube_clips(deduped)
+
+    # C-SPAN discovery: find video URLs for hearings.
+    # Only search committees that have at least one hearing from other sources,
+    # to minimize C-SPAN requests (their WAF is aggressive with IP-level tracking).
+    try:
+        import cspan
+        active_keys = {h.committee_key for h in deduped}
+        cspan_results = cspan.discover_cspan(
+            committees, days=max(days, 7), active_keys=active_keys,
+        )
+        if cspan_results:
+            _attach_cspan_urls(deduped, cspan_results)
+    except ImportError:
+        log.debug("cspan module not available, skipping C-SPAN discovery")
+    except Exception as e:
+        log.warning("C-SPAN discovery failed: %s", e)
 
     # After dedup, enrich with testimony PDFs
     for hearing in deduped:
@@ -776,6 +966,51 @@ def _cross_committee_dedup(hearings: list[Hearing]) -> list[Hearing]:
                 result.append(h)
 
     return result
+
+
+def _attach_cspan_urls(hearings: list[Hearing], cspan_results: dict[str, list[dict]]) -> None:
+    """Match C-SPAN video URLs to hearings by committee_key + date.
+
+    C-SPAN results are keyed by committee_key with lists of {title, date, url}.
+    Most committees have at most 1 hearing per day, so committee+date is ~90%
+    sufficient. Title keyword overlap is used as a tiebreaker when there are
+    multiple hearings on the same day.
+    """
+    attached = 0
+    for key, videos in cspan_results.items():
+        for video in videos:
+            video_date = video.get("date", "")
+            video_title = video.get("title", "")
+            video_url = video.get("url", "")
+            if not video_url or not video_date:
+                continue
+
+            # Find matching hearings (same committee + date)
+            candidates = [
+                h for h in hearings
+                if h.committee_key == key and h.date == video_date
+            ]
+
+            if not candidates:
+                log.debug("  C-SPAN unmatched: %s %s %s",
+                          key, video_date, video_title[:40])
+                continue
+
+            if len(candidates) == 1:
+                best = candidates[0]
+            else:
+                # Multiple hearings same day — use title similarity
+                best = max(candidates,
+                           key=lambda h: _title_similarity(h.title, video_title))
+
+            if "cspan_url" not in best.sources:
+                best.sources["cspan_url"] = video_url
+                attached += 1
+                log.debug("  C-SPAN matched: %s -> %s", video_title[:40],
+                          best.title[:40])
+
+    if attached:
+        log.info("Attached %d C-SPAN video URLs to hearings", attached)
 
 
 if __name__ == "__main__":
