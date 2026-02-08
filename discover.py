@@ -145,41 +145,52 @@ def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hear
     cutoff = datetime.now() - timedelta(days=days)
     cutoff_str = cutoff.strftime("%Y%m%d")
 
-    try:
-        result = subprocess.run(
-            [
-                "yt-dlp",
-                "--remote-components", "ejs:github",
-                "--no-download",
-                "--print", "%(id)s\t%(title)s\t%(upload_date)s\t%(duration)s",
-                "--dateafter", cutoff_str,
-                "--playlist-end", "50",
-                "--match-filter", "!is_live & !is_upcoming",
-                f"{youtube_url}/videos",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=_YT_DLP_ENV,
-        )
-    except FileNotFoundError as e:
-        log.error("CRITICAL: yt-dlp not found! %s", e)
-        raise
-    except subprocess.TimeoutExpired as e:
-        log.warning("yt-dlp timed out for %s: %s", committee_key, e)
-        return []
+    # Scan both /videos and /streams — some channels (like C-SPAN) post
+    # hearings as live streams that don't appear in the /videos tab.
+    tabs = [f"{youtube_url}/videos"]
+    if meta.get("scan_streams", False):
+        tabs.append(f"{youtube_url}/streams")
 
-    if result.returncode != 0 and not result.stdout.strip():
-        stderr = result.stderr.strip()
-        if stderr:
-            log.warning("yt-dlp errors for %s: %s", committee_key, stderr[:200])
+    all_stdout = ""
+    for tab_url in tabs:
+        try:
+            result = subprocess.run(
+                [
+                    "yt-dlp",
+                    "--remote-components", "ejs:github",
+                    "--no-download",
+                    "--print", "%(id)s\t%(title)s\t%(upload_date)s\t%(duration)s",
+                    "--dateafter", cutoff_str,
+                    "--playlist-end", "50",
+                    "--match-filter", "!is_live & !is_upcoming",
+                    tab_url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=_YT_DLP_ENV,
+            )
+            all_stdout += result.stdout
+            if result.returncode != 0 and not result.stdout.strip():
+                stderr = result.stderr.strip()
+                if stderr:
+                    log.warning("yt-dlp errors for %s: %s", committee_key, stderr[:200])
+        except FileNotFoundError as e:
+            log.error("CRITICAL: yt-dlp not found! %s", e)
+            raise
+        except subprocess.TimeoutExpired as e:
+            log.warning("yt-dlp timed out for %s (%s): %s", committee_key, tab_url, e)
 
     hearings = []
-    for line in result.stdout.strip().splitlines():
+    seen_ids: set[str] = set()
+    for line in all_stdout.strip().splitlines():
         parts = line.split("\t", 3)
         if len(parts) < 4:
             continue
         vid_id, title, upload_date, duration_str = parts
+        if vid_id in seen_ids:
+            continue
+        seen_ids.add(vid_id)
         if not upload_date or upload_date == "NA" or len(upload_date) < 8:
             continue
         if upload_date < cutoff_str:
@@ -284,6 +295,119 @@ def _attach_youtube_clips(hearings: list[Hearing]) -> None:
         log.debug("  %d YouTube clips unmatched (no website hearing found)", unmatched)
 
     _youtube_clips.clear()
+
+
+# ---------------------------------------------------------------------------
+# C-SPAN YouTube: cross-committee hearing video discovery
+# ---------------------------------------------------------------------------
+
+_CSPAN_YOUTUBE = "https://www.youtube.com/channel/UCb--64Gl51jIEVE-GLDAVTg"
+
+# Non-hearing C-SPAN programming to skip (case-insensitive prefix match)
+_CSPAN_YT_SKIP = (
+    "washington today", "after words:", "lectures in history:",
+    "booknotes", "q&a podcast:", "abc podcast:", "america's book club",
+    "ceasefire podcast:", "extreme mortman:",
+)
+
+
+def discover_cspan_youtube(hearings: list[Hearing], days: int = 7) -> int:
+    """Scan C-SPAN's YouTube /streams for full hearing videos.
+
+    Matches found videos to existing hearings by title keywords + date,
+    then attaches the YouTube URL. C-SPAN posts hearings as live streams,
+    not regular uploads, so we scan the /streams tab.
+
+    Returns the number of hearings matched.
+    """
+    cutoff_str = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+
+    try:
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "--remote-components", "ejs:github",
+                "--no-download",
+                "--print", "%(id)s\t%(title)s\t%(upload_date)s\t%(duration)s",
+                "--dateafter", cutoff_str,
+                "--playlist-end", "30",
+                "--match-filter", "!is_live & !is_upcoming & duration>=1800",
+                f"{_CSPAN_YOUTUBE}/streams",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=_YT_DLP_ENV,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.warning("C-SPAN YouTube scan failed: %s", e)
+        return 0
+
+    videos: list[dict] = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) < 4:
+            continue
+        vid_id, title, upload_date, duration_str = parts
+        if not upload_date or upload_date == "NA" or len(upload_date) < 8:
+            continue
+
+        # Skip non-hearing C-SPAN programming
+        title_lower = title.lower()
+        if any(title_lower.startswith(prefix) for prefix in _CSPAN_YT_SKIP):
+            continue
+
+        try:
+            duration = int(float(duration_str))
+        except (ValueError, TypeError):
+            continue
+
+        date_formatted = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
+        videos.append({
+            "vid_id": vid_id,
+            "title": title,
+            "date": date_formatted,
+            "duration": duration,
+        })
+
+    if not videos:
+        log.info("C-SPAN YouTube: no hearing streams found")
+        return 0
+
+    log.info("C-SPAN YouTube: %d candidate streams", len(videos))
+
+    # Match each video to existing hearings by date + title similarity
+    matched = 0
+    for video in videos:
+        best_match: Hearing | None = None
+        best_sim = 0.0
+
+        for h in hearings:
+            if h.date != video["date"]:
+                continue
+            # Already has a YouTube URL with decent duration — skip
+            if ("youtube_url" in h.sources
+                    and h.sources.get("youtube_duration", 0) >= 1800):
+                continue
+            sim = _title_similarity(h.title, video["title"])
+            if sim > best_sim:
+                best_sim = sim
+                best_match = h
+
+        if best_match and best_sim >= 0.10:
+            yt_url = f"https://www.youtube.com/watch?v={video['vid_id']}"
+            best_match.sources["youtube_url"] = yt_url
+            best_match.sources["youtube_id"] = video["vid_id"]
+            best_match.sources["youtube_duration"] = video["duration"]
+            matched += 1
+            log.info("  C-SPAN YT matched: '%s' -> '%s' (sim=%.2f)",
+                     video["title"][:50], best_match.title[:50], best_sim)
+        else:
+            log.debug("  C-SPAN YT unmatched: '%s' (best_sim=%.2f)",
+                      video["title"][:60], best_sim)
+
+    log.info("C-SPAN YouTube: %d matched out of %d streams", matched, len(videos))
+    return matched
 
 
 # ---------------------------------------------------------------------------
@@ -805,6 +929,14 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
 
     # Attach YouTube clips to matching website hearings
     _attach_youtube_clips(deduped)
+
+    # C-SPAN YouTube: match full hearing streams to existing hearings
+    try:
+        n_yt = discover_cspan_youtube(deduped, days=max(days, 7))
+        if n_yt:
+            log.info("C-SPAN YouTube: matched %d hearing(s)", n_yt)
+    except Exception as e:
+        log.warning("C-SPAN YouTube discovery failed: %s", e)
 
     # C-SPAN discovery: 3-step strategy (DDG → targeted → rotation)
     # Only search for past hearings — future ones can't have video yet.

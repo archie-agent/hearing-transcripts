@@ -438,7 +438,7 @@ def _parse_search_results(page, cutoff: datetime) -> list[dict]:
 # DuckDuckGo-based C-SPAN URL lookup (zero WAF cost)
 # ---------------------------------------------------------------------------
 
-_DDG_DELAY = 2.5  # seconds between DDG searches (be polite)
+_DDG_DELAY = 4.0  # seconds between DDG searches (avoid 202 rate limits)
 
 _STOPWORDS = {
     "the", "a", "an", "of", "in", "on", "to", "for", "and", "or",
@@ -515,8 +515,8 @@ def discover_cspan_google(
             )
             if resp.status_code == 202:
                 # DDG returns 202 when rate-limited; back off and retry once
-                log.debug("DDG rate-limited (202), backing off 5s...")
-                _time.sleep(5)
+                log.debug("DDG rate-limited (202), backing off 10s...")
+                _time.sleep(10)
                 resp = httpx.post(
                     "https://html.duckduckgo.com/html/",
                     data={"q": query},
