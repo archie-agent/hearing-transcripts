@@ -14,7 +14,8 @@ log = logging.getLogger(__name__)
 # Paths
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).parent
-OUTPUT_DIR = ROOT / "output"
+RUNS_DIR = ROOT / "runs"
+TRANSCRIPTS_DIR = ROOT / "transcripts"
 DATA_DIR = ROOT / "data"
 COMMITTEES_JSON = DATA_DIR / "committees.json"
 
@@ -56,6 +57,9 @@ MAX_COST_PER_RUN = float(os.environ.get("MAX_COST_PER_RUN", "5.0"))
 
 # Maximum audio file size for OpenAI API (bytes). Files larger get chunked.
 OPENAI_MAX_FILE_BYTES = 25 * 1024 * 1024  # 25 MB
+
+# Whisper cost estimation: $0.006 per minute of audio
+WHISPER_COST_PER_MINUTE = 0.006
 
 # ---------------------------------------------------------------------------
 # Congress number

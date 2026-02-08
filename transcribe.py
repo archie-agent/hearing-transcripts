@@ -49,8 +49,11 @@ def get_youtube_captions(youtube_url: str, output_dir: Path) -> Path | None:
         log.info("Captions saved: %s (%d chars)", captions_file, len(text))
         return captions_file
 
+    except FileNotFoundError as e:
+        log.error("CRITICAL: yt-dlp not found! Install it or check PATH. %s", e)
+        raise
     except Exception as e:
-        log.warning("Caption download failed for %s: %s", youtube_url, e)
+        log.error("Caption download FAILED for %s: %s", youtube_url, e)
         return None
 
 
@@ -249,12 +252,17 @@ def process_hearing_audio(
                     len(cleanup_result.text), cleanup_result.cost_usd, cleanup_result.model,
                 )
             except Exception as e:
-                log.warning("LLM cleanup failed: %s", e)
+                log.error("LLM cleanup FAILED for '%s': %s", hearing_title[:60], e)
 
     # Download and transcribe audio only if explicitly configured for Whisper
     if config.TRANSCRIPTION_BACKEND != "captions-only":
         audio = download_audio(youtube_url, output_dir)
         if audio:
+            # Estimate whisper cost from file size (~1 MB per minute of mp3 at quality 5)
+            size_mb = audio.stat().st_size / (1024 * 1024)
+            estimated_minutes = size_mb  # rough: 1 MB ≈ 1 min for mp3
+            result["whisper_cost_usd"] = estimated_minutes * config.WHISPER_COST_PER_MINUTE
+
             text = transcribe_audio(audio)
             if text:
                 transcript_path = output_dir / "transcript_whisper.txt"

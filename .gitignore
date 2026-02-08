@@ -9,6 +9,8 @@ data/pdfs/
 data/state.db
 data/logs/
 output/
+runs/
+transcripts/
 *.mp3
 *.wav
 *.m4a

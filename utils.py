@@ -10,9 +10,10 @@ from threading import Lock
 import httpx
 
 
-# yt-dlp environment setup
+# yt-dlp environment setup — include venv bin so yt-dlp is found
+_VENV_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin")
 DENO_DIR = os.path.expanduser("~/.deno/bin")
-YT_DLP_ENV = {**os.environ, "PATH": f"{DENO_DIR}:{os.environ.get('PATH', '')}"}
+YT_DLP_ENV = {**os.environ, "PATH": f"{_VENV_BIN}:{DENO_DIR}:{os.environ.get('PATH', '')}"}
 
 
 def get_http_client(retries: int = 3, timeout: float = 20.0) -> httpx.Client:

@@ -118,8 +118,18 @@ def _http_get(url: str, timeout: float = 20.0) -> httpx.Response | None:
 # YouTube discovery via yt-dlp
 # ---------------------------------------------------------------------------
 
+# Minimum video duration (seconds) to consider a YouTube video a real hearing.
+# Clips under this are kept separately but won't be promoted as standalone hearings.
+_MIN_HEARING_DURATION = 600  # 10 minutes
+
+
 def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hearing]:
-    """Find recent videos on a committee's YouTube channel."""
+    """Find recent videos on a committee's YouTube channel.
+
+    Returns two categories:
+    - Full hearings (>= 10 min): created as standalone Hearing objects
+    - Short clips (< 10 min): stored in _youtube_clips for later matching
+    """
     youtube_url = meta.get("youtube")
     if not youtube_url:
         return []
@@ -133,7 +143,7 @@ def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hear
                 "yt-dlp",
                 "--remote-components", "ejs:github",
                 "--no-download",
-                "--print", "%(id)s\t%(title)s\t%(upload_date)s",
+                "--print", "%(id)s\t%(title)s\t%(upload_date)s\t%(duration)s",
                 "--dateafter", cutoff_str,
                 "--playlist-end", "50",
                 "--match-filter", "!is_live & !is_upcoming",
@@ -144,8 +154,11 @@ def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hear
             timeout=120,
             env=_YT_DLP_ENV,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        log.warning("yt-dlp failed for %s: %s", committee_key, e)
+    except FileNotFoundError as e:
+        log.error("CRITICAL: yt-dlp not found! %s", e)
+        raise
+    except subprocess.TimeoutExpired as e:
+        log.warning("yt-dlp timed out for %s: %s", committee_key, e)
         return []
 
     if result.returncode != 0 and not result.stdout.strip():
@@ -155,28 +168,114 @@ def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hear
 
     hearings = []
     for line in result.stdout.strip().splitlines():
-        parts = line.split("\t", 2)
-        if len(parts) < 3:
+        parts = line.split("\t", 3)
+        if len(parts) < 4:
             continue
-        vid_id, title, upload_date = parts
+        vid_id, title, upload_date, duration_str = parts
         if not upload_date or upload_date == "NA" or len(upload_date) < 8:
             continue
         if upload_date < cutoff_str:
             continue
 
+        try:
+            duration = int(float(duration_str)) if duration_str and duration_str != "NA" else 0
+        except (ValueError, TypeError):
+            duration = 0
+
         date_formatted = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
-        hearings.append(Hearing(
-            committee_key=committee_key,
-            committee_name=meta.get("name", committee_key),
-            title=title,
-            date=date_formatted,
-            sources={
-                "youtube_url": f"https://www.youtube.com/watch?v={vid_id}",
-                "youtube_id": vid_id,
-            },
-        ))
+        yt_source = {
+            "youtube_url": f"https://www.youtube.com/watch?v={vid_id}",
+            "youtube_id": vid_id,
+            "youtube_duration": duration,
+        }
+
+        if duration >= _MIN_HEARING_DURATION:
+            # Long enough to be a real hearing
+            hearings.append(Hearing(
+                committee_key=committee_key,
+                committee_name=meta.get("name", committee_key),
+                title=title,
+                date=date_formatted,
+                sources=yt_source,
+            ))
+            dur_str = f"{duration // 60}m{duration % 60:02d}s"
+            log.debug("  YouTube hearing: %s (%s) %s", vid_id, dur_str, title[:60])
+        else:
+            # Short clip — stash for later matching with website hearings
+            _youtube_clips.append({
+                "committee_key": committee_key,
+                "date": date_formatted,
+                "title": title,
+                "duration": duration,
+                **yt_source,
+            })
+            dur_str = f"{duration // 60}m{duration % 60:02d}s"
+            log.debug("  YouTube clip (skipped): %s (%s) %s", vid_id, dur_str, title[:60])
 
     return hearings
+
+
+# Clips shorter than _MIN_HEARING_DURATION, stashed during YouTube discovery
+# for later matching with website hearings in _attach_youtube_clips().
+_youtube_clips: list[dict] = []
+
+
+def _attach_youtube_clips(hearings: list[Hearing]) -> None:
+    """Match stashed YouTube clips to website hearings by committee + date + title.
+
+    When a committee posts both a full hearing page on their website AND short
+    YouTube clips (chairman statements, member interviews, etc.), we attach the
+    clip URLs as supplementary metadata on the matching website hearing rather
+    than treating the clips as standalone hearings.
+    """
+    if not _youtube_clips:
+        return
+
+    attached = 0
+    for clip in _youtube_clips:
+        best_match: Hearing | None = None
+        best_sim = 0.0
+
+        for h in hearings:
+            # Must be same committee
+            if h.committee_key != clip["committee_key"]:
+                continue
+            # Must be same date (or within 1 day to handle upload-date drift)
+            if h.date != clip["date"]:
+                continue
+            sim = _title_similarity(h.title, clip["title"])
+            if sim > best_sim:
+                best_sim = sim
+                best_match = h
+
+        # Require a minimum similarity — clips often have very different titles
+        # ("Chairman's Opening Statement") so we use a lower bar than cross-dedup
+        if best_match and best_sim >= 0.15:
+            # Don't overwrite a real hearing YouTube URL with a clip
+            if "youtube_url" not in best_match.sources:
+                best_match.sources["youtube_url"] = clip["youtube_url"]
+                best_match.sources["youtube_id"] = clip["youtube_id"]
+                best_match.sources["youtube_duration"] = clip["duration"]
+            # Also store clips list for reference
+            clips_list = best_match.sources.setdefault("youtube_clips", [])
+            clips_list.append({
+                "url": clip["youtube_url"],
+                "title": clip["title"],
+                "duration": clip["duration"],
+            })
+            attached += 1
+            log.debug("  Clip matched: %s -> %s (sim=%.2f)",
+                      clip["title"][:40], best_match.title[:40], best_sim)
+
+    if attached:
+        log.info("Attached %d YouTube clips to %s hearing(s)",
+                 attached, len({id(h) for h in hearings
+                                if "youtube_clips" in h.sources}))
+    unmatched = len(_youtube_clips) - attached
+    if unmatched:
+        log.debug("  %d YouTube clips unmatched (no website hearing found)", unmatched)
+
+    _youtube_clips.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +592,7 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None) -> li
     if committees is None:
         committees = config.get_committees()
 
+    _youtube_clips.clear()  # Reset from any prior call in same process
     all_hearings: list[Hearing] = []
 
     # Parallel discovery across committees
@@ -523,6 +623,9 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None) -> li
     # Cross-committee dedup (different keys, same hearing)
     deduped = _cross_committee_dedup(deduped)
     log.info("Total hearings: %d (deduped from %d)", len(deduped), len(all_hearings))
+
+    # Attach YouTube clips to matching website hearings
+    _attach_youtube_clips(deduped)
 
     # After dedup, enrich with testimony PDFs
     for hearing in deduped:

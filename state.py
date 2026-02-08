@@ -59,6 +59,18 @@ class State:
             """)
 
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS run_costs (
+                    run_id TEXT PRIMARY KEY,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    hearings_processed INTEGER DEFAULT 0,
+                    llm_cleanup_usd REAL DEFAULT 0,
+                    whisper_usd REAL DEFAULT 0,
+                    total_usd REAL DEFAULT 0
+                )
+            """)
+
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS scraper_health (
                     committee_key TEXT,
                     source_type TEXT,
@@ -258,6 +270,46 @@ class State:
             """, (threshold,))
 
             return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def record_run(self, run_id: str, started_at: str, completed_at: str,
+                   hearings_processed: int, llm_cleanup_usd: float,
+                   whisper_usd: float, total_usd: float) -> None:
+        """Record a pipeline run with cost breakdown."""
+        conn = self._get_conn()
+        try:
+            conn.execute("""
+                INSERT OR REPLACE INTO run_costs
+                    (run_id, started_at, completed_at, hearings_processed,
+                     llm_cleanup_usd, whisper_usd, total_usd)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (run_id, started_at, completed_at, hearings_processed,
+                  llm_cleanup_usd, whisper_usd, total_usd))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_total_cost(self) -> dict:
+        """Return cumulative cost across all runs."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute("""
+                SELECT COUNT(*) as runs,
+                       SUM(hearings_processed) as hearings,
+                       SUM(llm_cleanup_usd) as llm_cleanup_usd,
+                       SUM(whisper_usd) as whisper_usd,
+                       SUM(total_usd) as total_usd
+                FROM run_costs
+            """)
+            row = cursor.fetchone()
+            return {
+                "runs": row["runs"] or 0,
+                "hearings": row["hearings"] or 0,
+                "llm_cleanup_usd": row["llm_cleanup_usd"] or 0.0,
+                "whisper_usd": row["whisper_usd"] or 0.0,
+                "total_usd": row["total_usd"] or 0.0,
+            }
         finally:
             conn.close()
 
