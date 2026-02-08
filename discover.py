@@ -807,11 +807,15 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
     _attach_youtube_clips(deduped)
 
     # C-SPAN discovery: 3-step strategy (DDG → targeted → rotation)
+    # Only search for past hearings — future ones can't have video yet.
+    today = datetime.now().strftime("%Y-%m-%d")
+
     try:
         import cspan
 
         # Step 1: DuckDuckGo-based C-SPAN lookup (free, zero WAF cost)
-        unmatched = [h for h in deduped if "cspan_url" not in h.sources]
+        unmatched = [h for h in deduped
+                     if "cspan_url" not in h.sources and h.date <= today]
         if unmatched:
             google_results = cspan.discover_cspan_google(
                 [{"id": h.id, "title": h.title, "date": h.date,
@@ -825,7 +829,8 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
                         break
 
         # Step 2: Title-based C-SPAN search for remaining (WAF-limited)
-        still_unmatched = [h for h in deduped if "cspan_url" not in h.sources]
+        still_unmatched = [h for h in deduped
+                          if "cspan_url" not in h.sources and h.date <= today]
         if still_unmatched:
             targeted_results = cspan.discover_cspan_targeted(
                 [{"id": h.id, "title": h.title, "date": h.date,
