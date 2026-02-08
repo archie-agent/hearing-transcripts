@@ -1,0 +1,96 @@
+name: hearing-transcripts
+version: 1.0.0
+description: |
+  Daily pipeline that discovers congressional hearing videos and testimony
+  from economics-relevant committees, downloads captions, cleans them up
+  with LLM diarization, and dumps structured text for downstream parsing.
+
+author: archie-agent
+emoji: 🏛️
+
+command: python run.py
+
+examples:
+  - name: Full daily run
+    command: |
+      cd ~/code/hearing-transcripts && . .venv/bin/activate && python run.py
+
+  - name: Discover only
+    command: |
+      cd ~/code/hearing-transcripts && . .venv/bin/activate && python run.py --discover-only
+
+  - name: Look back 3 days
+    command: |
+      cd ~/code/hearing-transcripts && . .venv/bin/activate && python run.py --days 3
+
+  - name: Single committee
+    command: |
+      cd ~/code/hearing-transcripts && . .venv/bin/activate && python run.py --committee house.ways_and_means
+
+  - name: Tier 1 only
+    command: |
+      cd ~/code/hearing-transcripts && . .venv/bin/activate && python run.py --tier 1
+
+parameters:
+  - name: days
+    type: integer
+    required: false
+    description: How many days to look back
+    default: 1
+
+  - name: tier
+    type: integer
+    required: false
+    description: Only process committees at this tier level
+    options: [1, 2, 3]
+
+  - name: committee
+    type: string
+    required: false
+    description: Process a single committee (e.g., house.ways_and_means)
+
+  - name: discover-only
+    type: boolean
+    required: false
+    description: Just find new hearings without processing
+
+  - name: max-cost
+    type: number
+    required: false
+    description: Cap LLM spend in USD
+    default: 5.0
+
+  - name: workers
+    type: integer
+    required: false
+    description: Parallel processing workers
+    default: 3
+
+  - name: reprocess
+    type: boolean
+    required: false
+    description: Re-process already-done hearings
+
+environment:
+  OPENAI_API_KEY:
+    description: For Whisper transcription (optional)
+  OPENROUTER_API_KEY:
+    description: For LLM cleanup/diarization
+  GOVINFO_API_KEY:
+    description: For official GPO transcripts (uses DEMO_KEY if unset)
+  HEARINGS_ROOT:
+    description: Root directory of hearing-transcripts code
+    default: ~/code/hearing-transcripts
+  HEARINGS_RUNS_DIR:
+    description: Output directory for hearing runs
+    default: ~/data/hearing-transcripts/runs
+  HEARINGS_TRANSCRIPTS_DIR:
+    description: Output directory for transcripts
+    default: ~/data/hearing-transcripts/transcripts
+
+tags:
+  - hearings
+  - transcripts
+  - congress
+  - c-span
+  - automation

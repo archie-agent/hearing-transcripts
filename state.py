@@ -4,10 +4,6 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
-
-ROOT = Path(__file__).parent
 
 
 class State:
@@ -15,7 +11,8 @@ class State:
 
     def __init__(self, db_path: Path | None = None):
         if db_path is None:
-            db_path = ROOT / "data" / "state.db"
+            import config
+            db_path = config.DATA_DIR / "state.db"
 
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

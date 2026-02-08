@@ -13,9 +13,9 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-ROOT = Path(__file__).parent
-RUNS_DIR = ROOT / "runs"
-TRANSCRIPTS_DIR = ROOT / "transcripts"
+ROOT = Path(os.environ.get("HEARINGS_ROOT", str(Path(__file__).parent)))
+RUNS_DIR = Path(os.environ.get("HEARINGS_RUNS_DIR", str(ROOT / "runs")))
+TRANSCRIPTS_DIR = Path(os.environ.get("HEARINGS_TRANSCRIPTS_DIR", str(ROOT / "transcripts")))
 DATA_DIR = ROOT / "data"
 COMMITTEES_JSON = DATA_DIR / "committees.json"
 
