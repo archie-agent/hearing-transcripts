@@ -8,10 +8,12 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -22,9 +24,10 @@ from detail_scraper import scrape_hearing_detail
 
 log = logging.getLogger(__name__)
 
-# yt-dlp needs deno on PATH for JS challenge solving
+# yt-dlp needs deno on PATH for JS challenge solving, and the venv bin for yt-dlp itself
+_VENV_BIN = str(Path(sys.executable).parent)
 _DENO_DIR = os.path.expanduser("~/.deno/bin")
-_YT_DLP_ENV = {**os.environ, "PATH": f"{_DENO_DIR}:{os.environ.get('PATH', '')}"}
+_YT_DLP_ENV = {**os.environ, "PATH": f"{_VENV_BIN}:{_DENO_DIR}:{os.environ.get('PATH', '')}"}
 
 # Rate limiting: track last request time per domain
 _last_request: dict[str, float] = {}
@@ -398,11 +401,21 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
         log.warning("GovInfo returned non-JSON response")
         return []
 
+    # GovInfo collections API returns packages *modified* since cutoff, not
+    # *published* since cutoff.  Filter by dateIssued to drop old transcripts
+    # that merely got a metadata update.  GPO transcripts are published 3-6
+    # months after the hearing, so a 180-day window is generous.
+    date_floor = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+
     hearings = []
     for pkg in data.get("packages", []):
         pkg_id = pkg.get("packageId", "")
         date_issued = pkg.get("dateIssued", "")[:10]
         title = pkg.get("title", pkg_id)
+
+        # Skip packages published more than 180 days ago
+        if date_issued < date_floor:
+            continue
 
         # Detect chamber from package ID
         if "hhrg" in pkg_id.lower():
@@ -438,6 +451,7 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
             sources={"govinfo_package_id": pkg_id},
         ))
 
+    log.info("GovInfo: %d packages after date filtering (floor: %s)", len(hearings), date_floor)
     return hearings
 
 

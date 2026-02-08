@@ -67,8 +67,25 @@ def parse_date(text: str) -> str | None:
     return None
 
 
+def _is_plausible_hearing_date(date_str: str) -> bool:
+    """Check if a parsed date is plausible for a congressional hearing.
+
+    Rejects dates that are clearly embedded metadata (e.g., nomination term
+    expirations like 'January 19, 2031') rather than actual hearing dates.
+    """
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        now = datetime.now()
+        # Hearing can't be more than 2 years old or more than 6 months in the future
+        return (now - timedelta(days=730)) <= dt <= (now + timedelta(days=180))
+    except ValueError:
+        return False
+
+
 def _is_recent(date_str: str, cutoff: datetime) -> bool:
-    """Check if a YYYY-MM-DD date string is on or after the cutoff."""
+    """Check if a YYYY-MM-DD date string is on or after the cutoff and plausible."""
+    if not _is_plausible_hearing_date(date_str):
+        return False
     try:
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         return dt >= cutoff

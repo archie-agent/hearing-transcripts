@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scrapers import (
     ScrapedHearing,
+    _is_plausible_hearing_date,
     parse_date,
     scrape_aspnet_card,
     scrape_drupal_table,
@@ -64,6 +65,55 @@ class TestParseDate:
 
     def test_embedded_iso(self):
         assert parse_date("datetime='2026-01-15T09:00:00'") == "2026-01-15"
+
+
+# ---------------------------------------------------------------------------
+# Date plausibility filter
+# ---------------------------------------------------------------------------
+
+class TestIsPlausibleHearingDate:
+    def test_recent_date_is_plausible(self):
+        assert _is_plausible_hearing_date("2026-02-10") is True
+
+    def test_far_future_is_not_plausible(self):
+        """Term expiration dates like 'January 19, 2031' should be rejected."""
+        assert _is_plausible_hearing_date("2031-01-19") is False
+
+    def test_moderately_future_is_not_plausible(self):
+        assert _is_plausible_hearing_date("2027-11-12") is False
+
+    def test_slightly_future_is_plausible(self):
+        # A hearing scheduled 3 months from now is fine
+        from datetime import datetime, timedelta
+        future = (datetime.now() + timedelta(days=90)).strftime("%Y-%m-%d")
+        assert _is_plausible_hearing_date(future) is True
+
+    def test_very_old_is_not_plausible(self):
+        assert _is_plausible_hearing_date("2020-01-01") is False
+
+    def test_invalid_date_is_not_plausible(self):
+        assert _is_plausible_hearing_date("not-a-date") is False
+
+
+class TestNewSenateCmsDatePlausibility:
+    """Regression: Senate Finance titles contain nomination term expirations
+    like '...term expiring January 19, 2031' which should not be picked up
+    as the hearing date."""
+
+    def test_rejects_term_expiration_date_in_title(self):
+        html = """
+        <div>
+          <a href="/hearings/hearing-to-consider-nominations">
+            Hearing to Consider the Nominations of Arjun Mody, of New Jersey,
+            to be Deputy Commissioner Social Security for the term expiring
+            January 19, 2031
+          </a>
+        </div>
+        """
+        cutoff = datetime(2026, 1, 1)
+        results = scrape_new_senate_cms(html, "https://finance.senate.gov", cutoff)
+        # Should find 0 results because the only parseable date (2031) is implausible
+        assert len(results) == 0
 
 
 # ---------------------------------------------------------------------------
