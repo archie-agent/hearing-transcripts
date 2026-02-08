@@ -1,0 +1,251 @@
+{
+  "_meta": {
+    "description": "Committee-to-YouTube-channel mapping. Compiled Feb 2026.",
+    "notes": "House committees mostly use YouTube. Senate committees mostly use internal JW Player webcast on senate.gov."
+  },
+  "house": {
+    "judiciary": {
+      "name": "House Judiciary",
+      "code": "hsju00",
+      "youtube": "https://www.youtube.com/@USHouseJudiciaryGOP",
+      "website": "https://judiciary.house.gov",
+      "docs_house_gov": true
+    },
+    "armed_services": {
+      "name": "House Armed Services",
+      "code": "hsas00",
+      "youtube": "https://www.youtube.com/@HouseArmedServices",
+      "website": "https://armedservices.house.gov",
+      "docs_house_gov": true
+    },
+    "ways_and_means": {
+      "name": "House Ways and Means",
+      "code": "hswm00",
+      "youtube": "https://www.youtube.com/user/WandMRepublicans",
+      "website": "https://waysandmeans.house.gov",
+      "docs_house_gov": true
+    },
+    "foreign_affairs": {
+      "name": "House Foreign Affairs",
+      "code": "hsfa00",
+      "youtube": "https://www.youtube.com/channel/UCtxAmeCl0xtSuo7tHZpgcQA",
+      "website": "https://foreignaffairs.house.gov",
+      "docs_house_gov": true
+    },
+    "oversight": {
+      "name": "House Oversight and Accountability",
+      "code": "hsgo00",
+      "youtube": "https://www.youtube.com/user/oversightandreform",
+      "website": "https://oversight.house.gov",
+      "docs_house_gov": true
+    },
+    "appropriations": {
+      "name": "House Appropriations",
+      "code": "hsap00",
+      "youtube": "https://www.youtube.com/user/houseappropsgop",
+      "website": "https://appropriations.house.gov",
+      "docs_house_gov": true
+    },
+    "energy_commerce": {
+      "name": "House Energy and Commerce",
+      "code": "hsif00",
+      "youtube": "https://www.youtube.com/energyandcommerce",
+      "website": "https://energycommerce.house.gov",
+      "docs_house_gov": true
+    },
+    "financial_services": {
+      "name": "House Financial Services",
+      "code": "hsba00",
+      "youtube": "https://www.youtube.com/gopfinancialservices",
+      "website": "https://financialservices.house.gov",
+      "docs_house_gov": true
+    },
+    "budget": {
+      "name": "House Budget",
+      "code": "hsbu00",
+      "youtube": "https://www.youtube.com/HouseBudgetGOP",
+      "website": "https://budget.house.gov",
+      "docs_house_gov": true
+    },
+    "education_workforce": {
+      "name": "House Education and Workforce",
+      "code": "hsed00",
+      "youtube": "https://www.youtube.com/channel/UC8Ewe7WqGg01KRNjJCO5cjg",
+      "website": "https://edworkforce.house.gov",
+      "docs_house_gov": true
+    },
+    "natural_resources": {
+      "name": "House Natural Resources",
+      "code": "hsii00",
+      "youtube": "https://www.youtube.com/user/NaturalResourcesGOP",
+      "website": "https://naturalresources.house.gov",
+      "docs_house_gov": true
+    },
+    "homeland_security": {
+      "name": "House Homeland Security",
+      "code": "hshm00",
+      "youtube": "https://www.youtube.com/@HouseHomeland",
+      "website": "https://homeland.house.gov",
+      "docs_house_gov": true
+    },
+    "agriculture": {
+      "name": "House Agriculture",
+      "code": "hsag00",
+      "youtube": "https://www.youtube.com/user/AgRepublicans",
+      "website": "https://agriculture.house.gov",
+      "docs_house_gov": true
+    },
+    "transportation": {
+      "name": "House Transportation and Infrastructure",
+      "code": "hspw00",
+      "youtube": "https://www.youtube.com/Transport",
+      "website": "https://transportation.house.gov",
+      "docs_house_gov": true
+    },
+    "veterans_affairs": {
+      "name": "House Veterans' Affairs",
+      "code": "hsvr00",
+      "youtube": "https://www.youtube.com/user/HouseVetsAffairs",
+      "website": "https://veterans.house.gov",
+      "docs_house_gov": true
+    },
+    "rules": {
+      "name": "House Rules",
+      "code": "hsru00",
+      "youtube": "https://www.youtube.com/user/RulesReps",
+      "website": "https://rules.house.gov",
+      "docs_house_gov": true
+    },
+    "small_business": {
+      "name": "House Small Business",
+      "code": "hssm00",
+      "youtube": "https://youtube.com/SmallBizRepublicans",
+      "website": "https://smallbusiness.house.gov",
+      "docs_house_gov": true
+    },
+    "science": {
+      "name": "House Science, Space and Technology",
+      "code": "hssy00",
+      "youtube": "https://www.youtube.com/c/housesciencegop",
+      "website": "https://science.house.gov",
+      "docs_house_gov": true
+    },
+    "intelligence": {
+      "name": "House Intelligence (HPSCI)",
+      "code": "hlig00",
+      "youtube": null,
+      "website": "https://intelligence.house.gov",
+      "docs_house_gov": true,
+      "notes": "No confirmed YouTube channel; has videos page but channel URL not discoverable"
+    }
+  },
+  "senate": {
+    "banking": {
+      "name": "Senate Banking, Housing and Urban Affairs",
+      "code": "ssbk00",
+      "youtube": "https://www.youtube.com/@SenBankingGOP",
+      "website": "https://banking.senate.gov",
+      "webcast": "senate_internal",
+      "testimony_url_pattern": "https://www.banking.senate.gov/download/{lastname}-testimony-{MM-DD-YY}"
+    },
+    "finance": {
+      "name": "Senate Finance",
+      "code": "ssfi00",
+      "youtube": "https://www.youtube.com/user/SenFinanceMajority",
+      "website": "https://finance.senate.gov",
+      "webcast": "senate_internal"
+    },
+    "commerce": {
+      "name": "Senate Commerce, Science and Transportation",
+      "code": "sscm00",
+      "youtube": "https://www.youtube.com/@CommerceRepublicans",
+      "website": "https://commerce.senate.gov",
+      "webcast": "senate_internal"
+    },
+    "judiciary": {
+      "name": "Senate Judiciary",
+      "code": "ssju00",
+      "youtube": null,
+      "website": "https://judiciary.senate.gov",
+      "webcast": "senate_internal",
+      "notes": "Uses internal JW Player webcast; no YouTube channel found"
+    },
+    "armed_services": {
+      "name": "Senate Armed Services",
+      "code": "ssas00",
+      "youtube": null,
+      "website": "https://armed-services.senate.gov",
+      "webcast": "senate_internal"
+    },
+    "foreign_relations": {
+      "name": "Senate Foreign Relations",
+      "code": "ssfr00",
+      "youtube": null,
+      "website": "https://foreign.senate.gov",
+      "webcast": "senate_internal"
+    },
+    "intelligence": {
+      "name": "Senate Intelligence (SSCI)",
+      "code": "slin00",
+      "youtube": null,
+      "website": "https://intelligence.senate.gov",
+      "webcast": "senate_internal"
+    },
+    "appropriations": {
+      "name": "Senate Appropriations",
+      "code": "ssap00",
+      "youtube": null,
+      "website": "https://appropriations.senate.gov",
+      "webcast": "senate_internal"
+    },
+    "help": {
+      "name": "Senate HELP",
+      "code": "sshr00",
+      "youtube": null,
+      "website": "https://help.senate.gov",
+      "webcast": "senate_internal",
+      "notes": "Uses JW Player streaming at help.senate.gov"
+    },
+    "budget": {
+      "name": "Senate Budget",
+      "code": "ssbu00",
+      "youtube": null,
+      "website": "https://budget.senate.gov",
+      "webcast": "senate_internal"
+    },
+    "homeland_security": {
+      "name": "Senate Homeland Security and Governmental Affairs",
+      "code": "ssga00",
+      "youtube": null,
+      "website": "https://hsgac.senate.gov",
+      "webcast": "senate_internal",
+      "notes": "Has Rumble channel but no YouTube"
+    },
+    "environment": {
+      "name": "Senate Environment and Public Works",
+      "code": "ssev00",
+      "youtube": null,
+      "website": "https://epw.senate.gov",
+      "webcast": "senate_internal"
+    }
+  },
+  "other": {
+    "cspan": {
+      "name": "C-SPAN",
+      "youtube": "https://www.youtube.com/user/CSPAN",
+      "notes": "Selective coverage of hearings, not comprehensive. Clips and highlights, not always full recordings. Full archives at c-span.org."
+    },
+    "house_clerk": {
+      "name": "House Clerk (floor proceedings)",
+      "youtube": "https://www.youtube.com/USHouseClerk/live",
+      "notes": "Floor proceedings only, not committee hearings"
+    }
+  },
+  "aggregation_points": {
+    "congress_gov_video": "https://www.congress.gov/committees/video",
+    "congress_gov_schedule": "https://www.congress.gov/committee-schedule",
+    "senate_hearings": "https://www.senate.gov/committees/hearings_meetings.htm",
+    "house_docs": "https://docs.house.gov",
+    "govinfo_chrg": "https://api.govinfo.gov/collections/CHRG"
+  }
+}

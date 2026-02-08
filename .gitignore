@@ -3,7 +3,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-data/
+data/audio/
+data/transcripts/
+data/pdfs/
 output/
 *.mp3
 *.wav
