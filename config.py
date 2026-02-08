@@ -29,15 +29,27 @@ if GOVINFO_API_KEY == "DEMO_KEY":
     log.warning("Using GovInfo DEMO_KEY (40 req/min, 1000/hr). Register free at api.data.gov")
 
 # ---------------------------------------------------------------------------
+# Model choices — single place to change LLM/transcription models
+# ---------------------------------------------------------------------------
+# OpenRouter pricing per 1M tokens: (input, output)
+MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "google/gemini-2.0-flash-001":     (0.10,  0.40),
+    "google/gemini-2.0-flash-lite-001":(0.075, 0.30),
+    "openai/gpt-4o-mini":             (0.15,  0.60),
+    "google/gemini-3-flash-preview":   (0.50,  3.00),
+    "anthropic/claude-haiku-4-5":      (1.00,  5.00),
+}
+
+# LLM cleanup model for diarization + formatting of captions.
+# Runs via OpenRouter. Set to "" to skip cleanup.
+CLEANUP_MODEL = os.environ.get("CLEANUP_MODEL", "google/gemini-3-flash-preview")
+
+# ---------------------------------------------------------------------------
 # Transcription settings
 # ---------------------------------------------------------------------------
 # "captions-only" grabs YouTube auto-captions (free) — the default.
 # "openai" uses Whisper-1 or GPT-4o transcribe ($0.36/hr).
 TRANSCRIPTION_BACKEND = os.environ.get("TRANSCRIPTION_BACKEND", "captions-only")
-
-# LLM cleanup model for diarization + formatting of captions.
-# Runs via OpenRouter. Set to "" to skip cleanup.
-CLEANUP_MODEL = os.environ.get("CLEANUP_MODEL", "google/gemini-2.0-flash-001")
 
 # Maximum cost (USD) per pipeline run. Abort if exceeded.
 MAX_COST_PER_RUN = float(os.environ.get("MAX_COST_PER_RUN", "5.0"))

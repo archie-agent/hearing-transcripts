@@ -17,15 +17,9 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger(__name__)
+import config
 
-# Model pricing per 1M tokens (input, output)
-MODEL_PRICING = {
-    "google/gemini-2.0-flash-001": (0.10, 0.40),
-    "google/gemini-2.0-flash-lite-001": (0.075, 0.30),
-    "openai/gpt-4o-mini": (0.15, 0.60),
-    "google/gemini-3-flash-preview": (0.50, 3.00),
-}
+logger = logging.getLogger(__name__)
 
 # Default chunking parameters
 DEFAULT_CHUNK_SIZE = 3000  # tokens (approximate)
@@ -223,11 +217,11 @@ def _calculate_cost(
     Returns:
         Cost in USD
     """
-    if model not in MODEL_PRICING:
+    if model not in config.MODEL_PRICING:
         logger.warning(f"Unknown model {model}, cannot calculate cost")
         return 0.0
 
-    input_price, output_price = MODEL_PRICING[model]
+    input_price, output_price = config.MODEL_PRICING[model]
 
     # Prices are per 1M tokens
     input_cost = (input_tokens / 1_000_000) * input_price
@@ -282,7 +276,7 @@ def cleanup_transcript(
     raw_text: str,
     hearing_title: str = "",
     committee_name: str = "",
-    model: str = "google/gemini-2.0-flash-001",
+    model: str | None = None,
 ) -> CleanupResult:
     """Clean up and diarize raw caption text.
 
@@ -304,6 +298,8 @@ def cleanup_transcript(
         ValueError: If API key is not configured
         httpx.HTTPError: If API calls fail
     """
+    if model is None:
+        model = config.CLEANUP_MODEL
     logger.info(f"Starting cleanup with model: {model}")
 
     # Get API key (lazy loading)
