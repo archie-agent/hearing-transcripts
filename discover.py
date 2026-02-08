@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import subprocess
+import time as _time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 import httpx
-from bs4 import BeautifulSoup
 
 import config
+import scrapers
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +25,25 @@ log = logging.getLogger(__name__)
 _DENO_DIR = os.path.expanduser("~/.deno/bin")
 _YT_DLP_ENV = {**os.environ, "PATH": f"{_DENO_DIR}:{os.environ.get('PATH', '')}"}
 
+# Rate limiting: track last request time per domain
+_last_request: dict[str, float] = {}
+_MIN_DELAY = 1.0  # seconds between requests to same domain
+
+
+def _rate_limit(url: str) -> None:
+    """Sleep if needed to respect minimum delay between requests to same domain."""
+    domain = urlparse(url).netloc
+    now = _time.monotonic()
+    last = _last_request.get(domain, 0)
+    wait = _MIN_DELAY - (now - last)
+    if wait > 0:
+        _time.sleep(wait)
+    _last_request[domain] = _time.monotonic()
+
+
+# ---------------------------------------------------------------------------
+# Hearing dataclass
+# ---------------------------------------------------------------------------
 
 @dataclass
 class Hearing:
@@ -35,29 +58,72 @@ class Hearing:
     #   govinfo_package_id
 
     @property
+    def id(self) -> str:
+        """Deterministic hearing ID from key fields."""
+        normalized = _normalize_title(self.title)
+        raw = f"{self.committee_key}:{self.date}:{normalized}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:12]
+
+    @property
     def slug(self) -> str:
         safe = re.sub(r"[^a-z0-9]+", "-", self.title.lower())[:80].strip("-")
-        chamber = self.committee_key.split(".")[0]
-        committee = self.committee_key.split(".")[1].replace("_", "-")
+        parts = self.committee_key.split(".", 1)
+        chamber = parts[0]
+        committee = parts[1].replace("_", "-") if len(parts) > 1 else "unknown"
         return f"{chamber}-{committee}-{safe}"
+
+
+# ---------------------------------------------------------------------------
+# Title normalization for dedup
+# ---------------------------------------------------------------------------
+
+def _normalize_title(title: str) -> str:
+    """Normalize a hearing title for comparison/dedup."""
+    title = re.sub(
+        r"^(Full Committee |Subcommittee )?Hearing:?\s*",
+        "", title, flags=re.IGNORECASE,
+    )
+    title = re.sub(r"^HEARING NOTICE:?\s*", "", title, flags=re.IGNORECASE)
+    words = re.sub(r"[^a-z0-9\s]", "", title.lower()).split()[:8]
+    return " ".join(words)
+
+
+# ---------------------------------------------------------------------------
+# HTTP client with retries
+# ---------------------------------------------------------------------------
+
+def _http_get(url: str, timeout: float = 20.0) -> httpx.Response | None:
+    """Fetch a URL with retries and rate limiting. Returns None on failure."""
+    _rate_limit(url)
+    transport = httpx.HTTPTransport(retries=2)
+    try:
+        with httpx.Client(transport=transport, timeout=timeout,
+                          follow_redirects=True,
+                          headers={"User-Agent": "Mozilla/5.0 (compatible; HearingBot/1.0)"}) as client:
+            resp = client.get(url)
+            if resp.status_code != 200:
+                log.warning("HTTP %s for %s", resp.status_code, url)
+                return None
+            return resp
+    except Exception as e:
+        log.warning("HTTP error for %s: %s", url, e)
+        return None
 
 
 # ---------------------------------------------------------------------------
 # YouTube discovery via yt-dlp
 # ---------------------------------------------------------------------------
 
-def discover_youtube(committee_key: str, days: int = 1) -> list[Hearing]:
+def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hearing]:
     """Find recent videos on a committee's YouTube channel."""
-    meta = config.get_committee_meta(committee_key)
-    if not meta or not meta.get("youtube"):
+    youtube_url = meta.get("youtube")
+    if not youtube_url:
         return []
 
-    channel_url = meta["youtube"]
     cutoff = datetime.now() - timedelta(days=days)
     cutoff_str = cutoff.strftime("%Y%m%d")
 
     try:
-        # Use --remote-components for YouTube JS challenge solving (requires deno)
         result = subprocess.run(
             [
                 "yt-dlp",
@@ -65,8 +131,9 @@ def discover_youtube(committee_key: str, days: int = 1) -> list[Hearing]:
                 "--no-download",
                 "--print", "%(id)s\t%(title)s\t%(upload_date)s",
                 "--dateafter", cutoff_str,
-                "--playlist-end", "20",
-                f"{channel_url}/videos",
+                "--playlist-end", "50",
+                "--match-filter", "!is_live & !is_upcoming",
+                f"{youtube_url}/videos",
             ],
             capture_output=True,
             text=True,
@@ -77,10 +144,9 @@ def discover_youtube(committee_key: str, days: int = 1) -> list[Hearing]:
         log.warning("yt-dlp failed for %s: %s", committee_key, e)
         return []
 
-    if result.returncode != 0:
+    if result.returncode != 0 and not result.stdout.strip():
         stderr = result.stderr.strip()
-        # Partial failures are common (some videos unavailable)
-        if "ERROR" in stderr and not result.stdout.strip():
+        if stderr:
             log.warning("yt-dlp errors for %s: %s", committee_key, stderr[:200])
 
     hearings = []
@@ -95,10 +161,9 @@ def discover_youtube(committee_key: str, days: int = 1) -> list[Hearing]:
             continue
 
         date_formatted = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
-        committee_info = config.COMMITTEES.get(committee_key, {})
         hearings.append(Hearing(
             committee_key=committee_key,
-            committee_name=committee_info.get("name", committee_key),
+            committee_name=meta.get("name", committee_key),
             title=title,
             date=date_formatted,
             sources={
@@ -111,202 +176,36 @@ def discover_youtube(committee_key: str, days: int = 1) -> list[Hearing]:
 
 
 # ---------------------------------------------------------------------------
-# Senate committee website discovery
+# Website discovery using scraper registry
 # ---------------------------------------------------------------------------
 
-# Senate committee websites use Drupal with consistent table/link patterns.
-# Map committee keys to their hearings page URL.
-_SENATE_HEARINGS_URLS = {
-    "senate.finance":           "https://www.finance.senate.gov/hearings",
-    "senate.banking":           "https://www.banking.senate.gov/hearings",
-    "senate.budget":            "https://www.budget.senate.gov/hearings",
-    "senate.commerce":          "https://www.commerce.senate.gov/hearings",
-    "senate.appropriations":    "https://www.appropriations.senate.gov/hearings",
-    "senate.foreign_relations": "https://www.foreign.senate.gov/hearings",
-    "senate.help":              "https://www.help.senate.gov/hearings",
-    "senate.intelligence":      "https://www.intelligence.senate.gov/hearings",
-    "senate.homeland_security": "https://www.hsgac.senate.gov/hearings",
-    "senate.environment":       "https://www.epw.senate.gov/hearings",
-    "senate.judiciary":         "https://www.judiciary.senate.gov/hearings",
-}
+def discover_website(committee_key: str, meta: dict, days: int = 1) -> list[Hearing]:
+    """Scrape a committee's hearings page using the appropriate scraper."""
+    hearings_url = meta.get("hearings_url")
+    scraper_type = meta.get("scraper_type", "youtube_only")
 
-_MONTHS = {
-    "january": 1, "february": 2, "march": 3, "april": 4,
-    "may": 5, "june": 6, "july": 7, "august": 8,
-    "september": 9, "october": 10, "november": 11, "december": 12,
-}
-
-
-def _parse_date_flexible(text: str) -> str | None:
-    """Try to parse a date from various formats. Returns YYYY-MM-DD or None."""
-    text = text.strip()
-    # MM/DD/YY HH:MMAM
-    m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", text)
-    if m:
-        month, day, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        if year < 100:
-            year += 2000
-        return f"{year:04d}-{month:02d}-{day:02d}"
-    # Month DD, YYYY
-    m = re.search(r"(\w+)\s+(\d{1,2}),?\s+(\d{4})", text)
-    if m:
-        month_name = m.group(1).lower()
-        if month_name in _MONTHS:
-            return f"{int(m.group(3)):04d}-{_MONTHS[month_name]:02d}-{int(m.group(2)):02d}"
-    return None
-
-
-def discover_senate_website(committee_key: str, days: int = 1) -> list[Hearing]:
-    """Scrape a Senate committee's hearings page for recent hearings."""
-    url = _SENATE_HEARINGS_URLS.get(committee_key)
-    if not url:
+    if not hearings_url or scraper_type == "youtube_only":
+        return []
+    if not meta.get("scrapeable", False):
         return []
 
-    try:
-        resp = httpx.get(url, timeout=20, follow_redirects=True,
-                         headers={"User-Agent": "Mozilla/5.0"})
-        if resp.status_code != 200:
-            log.warning("Senate hearings page returned %s for %s", resp.status_code, committee_key)
-            return []
-    except Exception as e:
-        log.warning("Senate hearings page error for %s: %s", committee_key, e)
+    resp = _http_get(hearings_url)
+    if not resp:
         return []
 
-    soup = BeautifulSoup(resp.text, "lxml")
     cutoff = datetime.now() - timedelta(days=days)
-    committee_info = config.COMMITTEES.get(committee_key, {})
+    base_url = str(resp.url)
+
+    scraped = scrapers.scrape_website(scraper_type, resp.text, base_url, cutoff)
+
     hearings = []
-
-    # Senate sites use <table> with rows containing hearing info
-    # Each row typically has: title link, type, date
-    for row in soup.find_all("tr"):
-        cells = row.find_all("td")
-        if not cells:
-            continue
-
-        # Find a link to the hearing
-        link = row.find("a", href=True)
-        if not link:
-            continue
-        title = link.get_text(strip=True)
-        href = link.get("href", "")
-
-        # Skip navigation / non-hearing links
-        if not title or len(title) < 10:
-            continue
-
-        # Try to extract date from URL pattern /hearings/MM/DD/YYYY/... or from cell text
-        hearing_date = None
-
-        # Check URL for date: /hearings/02/05/2026/...
-        url_date = re.search(r"/hearings?/(\d{2})/(\d{2})/(\d{4})/", href)
-        if url_date:
-            month, day, year = url_date.groups()
-            hearing_date = f"{year}-{month}-{day}"
-
-        # Check cells for date text
-        if not hearing_date:
-            row_text = row.get_text(" ", strip=True)
-            hearing_date = _parse_date_flexible(row_text)
-
-        if not hearing_date:
-            continue
-
-        try:
-            dt = datetime.strptime(hearing_date, "%Y-%m-%d")
-            if dt < cutoff:
-                continue
-        except ValueError:
-            continue
-
-        # Build full URL
-        if href.startswith("/"):
-            base = str(resp.url).rstrip("/").split("/hearings")[0]
-            href = f"{base}{href}"
-
+    for s in scraped:
         hearings.append(Hearing(
             committee_key=committee_key,
-            committee_name=committee_info.get("name", committee_key),
-            title=title,
-            date=hearing_date,
-            sources={"website_url": href},
-        ))
-
-    return hearings
-
-
-# ---------------------------------------------------------------------------
-# House committee website discovery (WordPress-based sites)
-# ---------------------------------------------------------------------------
-
-# Some House committee sites are scrapeable. Map key to hearings URL.
-_HOUSE_HEARINGS_URLS = {
-    "house.ways_and_means":   "https://waysandmeans.house.gov/hearings/",
-    "house.budget":           "https://budget.house.gov/hearings/",
-    "house.oversight":        "https://oversight.house.gov/hearing/",
-}
-
-
-def discover_house_website(committee_key: str, days: int = 1) -> list[Hearing]:
-    """Scrape a House committee's hearings page. Handles WordPress-style layouts."""
-    url = _HOUSE_HEARINGS_URLS.get(committee_key)
-    if not url:
-        return []
-
-    try:
-        resp = httpx.get(url, timeout=20, follow_redirects=True,
-                         headers={"User-Agent": "Mozilla/5.0"})
-        if resp.status_code != 200:
-            return []
-    except Exception as e:
-        log.warning("House hearings page error for %s: %s", committee_key, e)
-        return []
-
-    soup = BeautifulSoup(resp.text, "lxml")
-    cutoff = datetime.now() - timedelta(days=days)
-    committee_info = config.COMMITTEES.get(committee_key, {})
-    hearings = []
-
-    # Ways & Means style: div.single-event with div.date-block and div.info
-    for event in soup.find_all("div", class_="single-event"):
-        date_block = event.find("div", class_="date-block")
-        info = event.find("div", class_="info")
-        if not date_block or not info:
-            continue
-
-        month_el = date_block.find("span", class_="month")
-        day_el = date_block.find("span", class_="day")
-        year_el = date_block.find("span", class_="year")
-        if not (month_el and day_el and year_el):
-            continue
-
-        month_name = month_el.get_text(strip=True).lower()
-        if month_name not in _MONTHS:
-            continue
-        try:
-            hearing_date = (
-                f"{int(year_el.get_text(strip=True)):04d}-"
-                f"{_MONTHS[month_name]:02d}-"
-                f"{int(day_el.get_text(strip=True)):02d}"
-            )
-            dt = datetime.strptime(hearing_date, "%Y-%m-%d")
-            if dt < cutoff:
-                continue
-        except (ValueError, TypeError):
-            continue
-
-        link = info.find("a", class_="name")
-        title = link.get_text(strip=True) if link else info.get_text(strip=True)[:120]
-        href = link.get("href", "") if link else ""
-        if href and not href.startswith("http"):
-            href = f"https://{resp.url.host}{href}"
-
-        hearings.append(Hearing(
-            committee_key=committee_key,
-            committee_name=committee_info.get("name", committee_key),
-            title=title,
-            date=hearing_date,
-            sources={"website_url": href},
+            committee_name=meta.get("name", committee_key),
+            title=s.title,
+            date=s.date,
+            sources={"website_url": s.url},
         ))
 
     return hearings
@@ -316,23 +215,38 @@ def discover_house_website(committee_key: str, days: int = 1) -> list[Hearing]:
 # GovInfo API discovery (official GPO transcripts)
 # ---------------------------------------------------------------------------
 
+# Map GovInfo committee codes to our committee keys
+_GOVINFO_CODE_MAP: dict[str, str] = {}
+
+def _build_govinfo_map() -> None:
+    """Build mapping from GovInfo package codes to committee keys."""
+    global _GOVINFO_CODE_MAP
+    for key, meta in config.COMMITTEES.items():
+        code = meta.get("code", "")
+        if code:
+            _GOVINFO_CODE_MAP[code] = key
+
+
 def discover_govinfo(days: int = 7) -> list[Hearing]:
     """Poll GovInfo API for recently published hearing transcripts."""
+    if not _GOVINFO_CODE_MAP:
+        _build_govinfo_map()
+
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
     url = (
         f"https://api.govinfo.gov/collections/CHRG/{cutoff}"
-        f"?offsetMark=*&pageSize=100&congress=119"
+        f"?offsetMark=*&pageSize=100&congress={config.CONGRESS}"
         f"&api_key={config.GOVINFO_API_KEY}"
     )
 
+    resp = _http_get(url, timeout=30)
+    if not resp:
+        return []
+
     try:
-        resp = httpx.get(url, timeout=30)
-        if resp.status_code != 200:
-            log.warning("GovInfo API returned %s", resp.status_code)
-            return []
         data = resp.json()
-    except Exception as e:
-        log.warning("GovInfo API error: %s", e)
+    except Exception:
+        log.warning("GovInfo returned non-JSON response")
         return []
 
     hearings = []
@@ -341,84 +255,117 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
         date_issued = pkg.get("dateIssued", "")[:10]
         title = pkg.get("title", pkg_id)
 
+        # Try to map to a specific committee via the package ID
+        # Package IDs look like CHRG-119hhrg12345 or CHRG-119shrg54321
+        committee_key = None
         if "hhrg" in pkg_id.lower():
-            chamber = "House"
+            chamber = "house"
         elif "shrg" in pkg_id.lower():
-            chamber = "Senate"
-        elif "jhrg" in pkg_id.lower():
-            chamber = "Joint"
+            chamber = "senate"
         else:
-            chamber = "Unknown"
+            chamber = "unknown"
+
+        # If we can't map to a specific committee, use a generic key
+        if not committee_key:
+            committee_key = f"govinfo.{chamber}"
 
         hearings.append(Hearing(
-            committee_key=f"govinfo.{chamber.lower()}",
-            committee_name=f"{chamber} (via GovInfo)",
+            committee_key=committee_key,
+            committee_name=f"{chamber.title()} (via GovInfo)",
             title=title,
             date=date_issued,
-            sources={
-                "govinfo_package_id": pkg_id,
-            },
+            sources={"govinfo_package_id": pkg_id},
         ))
 
     return hearings
 
 
 # ---------------------------------------------------------------------------
+# Discovery for a single committee (used in parallel)
+# ---------------------------------------------------------------------------
+
+def _discover_committee(key: str, meta: dict, days: int) -> list[Hearing]:
+    """Discover hearings for a single committee from all sources."""
+    results = []
+
+    # YouTube
+    try:
+        yt = discover_youtube(key, meta, days=days)
+        if yt:
+            log.info("  %s YouTube: %d videos", key, len(yt))
+            results.extend(yt)
+    except Exception as e:
+        log.warning("YouTube discovery failed for %s: %s", key, e)
+
+    # Website
+    try:
+        web = discover_website(key, meta, days=days)
+        if web:
+            log.info("  %s website: %d hearings", key, len(web))
+            results.extend(web)
+    except Exception as e:
+        log.warning("Website discovery failed for %s: %s", key, e)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Main discovery
 # ---------------------------------------------------------------------------
 
-def discover_all(days: int = 1) -> list[Hearing]:
-    """Run all discovery methods across configured committees."""
+def discover_all(days: int = 1, committees: dict[str, dict] | None = None) -> list[Hearing]:
+    """Run all discovery methods across committees. Parallelized."""
+    if committees is None:
+        committees = config.get_committees()
+
     all_hearings: list[Hearing] = []
 
-    for key in config.COMMITTEES:
-        log.info("Discovering: %s", key)
-
-        # YouTube (primary for House, some Senate)
-        yt = discover_youtube(key, days=days)
-        if yt:
-            log.info("  YouTube: %d videos", len(yt))
-            all_hearings.extend(yt)
-
-        # Senate committee websites
-        if key.startswith("senate."):
-            web = discover_senate_website(key, days=days)
-            if web:
-                log.info("  Senate website: %d hearings", len(web))
-                all_hearings.extend(web)
-
-        # House committee websites (where supported)
-        if key.startswith("house."):
-            web = discover_house_website(key, days=days)
-            if web:
-                log.info("  House website: %d hearings", len(web))
-                all_hearings.extend(web)
+    # Parallel discovery across committees
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {
+            pool.submit(_discover_committee, key, meta, days): key
+            for key, meta in committees.items()
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                hearings = future.result()
+                all_hearings.extend(hearings)
+            except Exception as e:
+                log.error("Discovery failed for %s: %s", key, e)
 
     # GovInfo (catches both chambers, longer lookback)
-    govinfo = discover_govinfo(days=max(days, 7))
-    if govinfo:
-        log.info("GovInfo: %d packages", len(govinfo))
-        all_hearings.extend(govinfo)
+    try:
+        govinfo = discover_govinfo(days=max(days, 7))
+        if govinfo:
+            log.info("GovInfo: %d packages", len(govinfo))
+            all_hearings.extend(govinfo)
+    except Exception as e:
+        log.warning("GovInfo discovery failed: %s", e)
 
-    # Deduplicate by (committee_key, date, title similarity)
+    # Deduplicate
     deduped = _deduplicate(all_hearings)
-    log.info("Total hearings found: %d (deduped from %d)", len(deduped), len(all_hearings))
+    log.info("Total hearings: %d (deduped from %d)", len(deduped), len(all_hearings))
+
     return deduped
 
+
+# ---------------------------------------------------------------------------
+# Deduplication
+# ---------------------------------------------------------------------------
 
 def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
     """Merge hearings that appear to be the same event from different sources."""
     merged: dict[str, Hearing] = {}
 
     for h in hearings:
-        # Simple dedup key: committee + date
-        dedup_key = f"{h.committee_key}:{h.date}"
+        # Dedup key includes normalized title prefix to handle same-day hearings
+        title_key = _normalize_title(h.title)
+        dedup_key = f"{h.committee_key}:{h.date}:{title_key}"
 
         if dedup_key in merged:
-            # Merge sources
             existing = merged[dedup_key]
             existing.sources.update(h.sources)
-            # Keep the longer title
             if len(h.title) > len(existing.title):
                 existing.title = h.title
         else:
@@ -431,6 +378,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     hearings = discover_all(days=3)
     for h in hearings:
-        print(f"[{h.date}] {h.committee_name}: {h.title}")
+        print(f"[{h.date}] [{h.id}] {h.committee_name}: {h.title}")
         print(f"  Sources: {json.dumps(h.sources, indent=2)}")
         print()

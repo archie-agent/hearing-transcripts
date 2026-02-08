@@ -1,8 +1,8 @@
-yt-dlp
-openai
-httpx
-pymupdf
-pymupdf4llm
-python-dotenv
-beautifulsoup4
-lxml
+yt-dlp>=2024.12.0
+httpx>=0.27
+python-dotenv>=1.0
+beautifulsoup4>=4.12
+lxml>=5.0
+pymupdf>=1.24
+pymupdf4llm>=0.0.17
+openai>=1.50

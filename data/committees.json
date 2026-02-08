@@ -1,244 +1,539 @@
 {
   "_meta": {
-    "description": "Committee-to-YouTube-channel mapping. Compiled Feb 2026.",
-    "notes": "House committees mostly use YouTube. Senate committees mostly use internal JW Player webcast on senate.gov."
+    "description": "Single source of truth for all committee configuration. Merged from surveys, YouTube mapping, and tier assignments. Feb 2026.",
+    "scraper_types": {
+      "wordpress_single_event": "House Ways & Means: div.single-event with span.month/day/year date blocks",
+      "evo_framework": "Drupal evo framework: time[datetime] elements near links (House Appropriations, Foreign Affairs, Judiciary, Rules)",
+      "aspnet_card": "ASP.NET: article.card-h-event or article.article-item with time[datetime] (House Financial Services, Armed Services)",
+      "html_table": "Generic HTML table rows with title links and date cells (House Budget, Science, Education & Workforce)",
+      "tribe_events": "WordPress Tribe Events plugin: article.tribe-events-calendar-list__event (House Homeland Security)",
+      "wordpress_featured_post": "WordPress: div.post.featured-post (House Oversight)",
+      "wordpress_calblocker": "WordPress: article.calblocker (House Veterans Affairs)",
+      "drupal_table": "Senate classic Drupal: table.table-striped with tr/td rows (Finance, Banking, Budget, Appropriations)",
+      "coldfusion_table": "Senate ColdFusion: table.recordList with tr/td rows (EPW, Small Business)",
+      "new_senate_cms": "New Senate CMS: links in body with /hearings/ pattern (Foreign Relations, HELP, Judiciary, Armed Services, Agriculture, Rules)",
+      "drupal_links": "Senate Drupal announcement-style: links with /YYYY/M/ date in URL (Commerce, Energy, Veterans)",
+      "wordpress_blog": "WordPress blog: article.et_pb_post (Senate Intelligence)",
+      "wordpress_elementor": "WordPress + Elementor + JetEngine: jet-listing-grid (HSGAC, Indian Affairs)",
+      "youtube_only": "No scrapeable website; rely on YouTube channel only"
+    }
   },
-  "house": {
-    "judiciary": {
-      "name": "House Judiciary",
-      "code": "hsju00",
-      "youtube": "https://www.youtube.com/@USHouseJudiciaryGOP",
-      "website": "https://judiciary.house.gov",
-      "docs_house_gov": true
-    },
-    "armed_services": {
-      "name": "House Armed Services",
-      "code": "hsas00",
-      "youtube": "https://www.youtube.com/@HouseArmedServices",
-      "website": "https://armedservices.house.gov",
-      "docs_house_gov": true
-    },
-    "ways_and_means": {
+  "committees": {
+    "house.ways_and_means": {
       "name": "House Ways and Means",
+      "chamber": "house",
       "code": "hswm00",
+      "tier": 1,
       "youtube": "https://www.youtube.com/user/WandMRepublicans",
       "website": "https://waysandmeans.house.gov",
-      "docs_house_gov": true
+      "hearings_url": "https://waysandmeans.house.gov/hearings/",
+      "scraper_type": "wordpress_single_event",
+      "scrapeable": true,
+      "requires_js": false
     },
-    "foreign_affairs": {
-      "name": "House Foreign Affairs",
-      "code": "hsfa00",
-      "youtube": "https://www.youtube.com/channel/UCtxAmeCl0xtSuo7tHZpgcQA",
-      "website": "https://foreignaffairs.house.gov",
-      "docs_house_gov": true
-    },
-    "oversight": {
-      "name": "House Oversight and Accountability",
-      "code": "hsgo00",
-      "youtube": "https://www.youtube.com/user/oversightandreform",
-      "website": "https://oversight.house.gov",
-      "docs_house_gov": true
-    },
-    "appropriations": {
-      "name": "House Appropriations",
-      "code": "hsap00",
-      "youtube": "https://www.youtube.com/user/houseappropsgop",
-      "website": "https://appropriations.house.gov",
-      "docs_house_gov": true
-    },
-    "energy_commerce": {
-      "name": "House Energy and Commerce",
-      "code": "hsif00",
-      "youtube": "https://www.youtube.com/energyandcommerce",
-      "website": "https://energycommerce.house.gov",
-      "docs_house_gov": true
-    },
-    "financial_services": {
+    "house.financial_services": {
       "name": "House Financial Services",
+      "chamber": "house",
       "code": "hsba00",
+      "tier": 1,
       "youtube": "https://www.youtube.com/gopfinancialservices",
       "website": "https://financialservices.house.gov",
-      "docs_house_gov": true
+      "hearings_url": "https://financialservices.house.gov/calendar/",
+      "scraper_type": "aspnet_card",
+      "scrapeable": true,
+      "requires_js": false,
+      "notes": "Noscript warning but article.card-h-event elements ARE in raw HTML"
     },
-    "budget": {
+    "house.energy_commerce": {
+      "name": "House Energy and Commerce",
+      "chamber": "house",
+      "code": "hsif00",
+      "tier": 1,
+      "youtube": "https://www.youtube.com/energyandcommerce",
+      "website": "https://energycommerce.house.gov",
+      "hearings_url": "https://energycommerce.house.gov/calendars",
+      "scraper_type": "youtube_only",
+      "scrapeable": false,
+      "requires_js": true,
+      "notes": "Next.js SPA; calendar items JS-rendered; YouTube only"
+    },
+    "house.budget": {
       "name": "House Budget",
+      "chamber": "house",
       "code": "hsbu00",
+      "tier": 1,
       "youtube": "https://www.youtube.com/HouseBudgetGOP",
       "website": "https://budget.house.gov",
-      "docs_house_gov": true
+      "hearings_url": "https://budget.house.gov/hearings/",
+      "scraper_type": "html_table",
+      "scrapeable": true,
+      "requires_js": false,
+      "notes": "Table layout with title/location/date columns; also has time[datetime]"
     },
-    "education_workforce": {
-      "name": "House Education and Workforce",
-      "code": "hsed00",
-      "youtube": "https://www.youtube.com/channel/UC8Ewe7WqGg01KRNjJCO5cjg",
-      "website": "https://edworkforce.house.gov",
-      "docs_house_gov": true
+    "house.appropriations": {
+      "name": "House Appropriations",
+      "chamber": "house",
+      "code": "hsap00",
+      "tier": 2,
+      "youtube": "https://www.youtube.com/user/houseappropsgop",
+      "website": "https://appropriations.house.gov",
+      "hearings_url": "https://appropriations.house.gov/schedule/hearings",
+      "scraper_type": "evo_framework",
+      "scrapeable": true,
+      "requires_js": false,
+      "notes": "Drupal evo framework; time[datetime] elements"
     },
-    "natural_resources": {
-      "name": "House Natural Resources",
-      "code": "hsii00",
-      "youtube": "https://www.youtube.com/user/NaturalResourcesGOP",
-      "website": "https://naturalresources.house.gov",
-      "docs_house_gov": true
-    },
-    "homeland_security": {
-      "name": "House Homeland Security",
-      "code": "hshm00",
-      "youtube": "https://www.youtube.com/@HouseHomeland",
-      "website": "https://homeland.house.gov",
-      "docs_house_gov": true
-    },
-    "agriculture": {
+    "house.agriculture": {
       "name": "House Agriculture",
+      "chamber": "house",
       "code": "hsag00",
+      "tier": 2,
       "youtube": "https://www.youtube.com/user/AgRepublicans",
       "website": "https://agriculture.house.gov",
-      "docs_house_gov": true
+      "hearings_url": "https://agriculture.house.gov/calendar/?Timeframe=All",
+      "scraper_type": "youtube_only",
+      "scrapeable": false,
+      "requires_js": true,
+      "notes": "Calendar content JS-rendered"
     },
-    "transportation": {
-      "name": "House Transportation and Infrastructure",
-      "code": "hspw00",
-      "youtube": "https://www.youtube.com/Transport",
-      "website": "https://transportation.house.gov",
-      "docs_house_gov": true
+    "house.foreign_affairs": {
+      "name": "House Foreign Affairs",
+      "chamber": "house",
+      "code": "hsfa00",
+      "tier": 2,
+      "youtube": "https://www.youtube.com/channel/UCtxAmeCl0xtSuo7tHZpgcQA",
+      "website": "https://foreignaffairs.house.gov",
+      "hearings_url": "https://foreignaffairs.house.gov/committee-activity/hearings/all",
+      "scraper_type": "evo_framework",
+      "scrapeable": true,
+      "requires_js": false
     },
-    "veterans_affairs": {
-      "name": "House Veterans' Affairs",
-      "code": "hsvr00",
-      "youtube": "https://www.youtube.com/user/HouseVetsAffairs",
-      "website": "https://veterans.house.gov",
-      "docs_house_gov": true
-    },
-    "rules": {
-      "name": "House Rules",
-      "code": "hsru00",
-      "youtube": "https://www.youtube.com/user/RulesReps",
-      "website": "https://rules.house.gov",
-      "docs_house_gov": true
-    },
-    "small_business": {
-      "name": "House Small Business",
-      "code": "hssm00",
-      "youtube": "https://youtube.com/SmallBizRepublicans",
-      "website": "https://smallbusiness.house.gov",
-      "docs_house_gov": true
-    },
-    "science": {
+    "house.science": {
       "name": "House Science, Space and Technology",
+      "chamber": "house",
       "code": "hssy00",
+      "tier": 2,
       "youtube": "https://www.youtube.com/c/housesciencegop",
       "website": "https://science.house.gov",
-      "docs_house_gov": true
+      "hearings_url": "https://science.house.gov/hearings/",
+      "scraper_type": "html_table",
+      "scrapeable": true,
+      "requires_js": false,
+      "notes": "Multiple tables grouped by subcommittee"
     },
-    "intelligence": {
+    "house.small_business": {
+      "name": "House Small Business",
+      "chamber": "house",
+      "code": "hssm00",
+      "tier": 2,
+      "youtube": "https://youtube.com/SmallBizRepublicans",
+      "website": "https://smallbusiness.house.gov",
+      "hearings_url": "https://smallbusiness.house.gov/calendar/",
+      "scraper_type": "youtube_only",
+      "scrapeable": false,
+      "requires_js": true
+    },
+    "house.transportation": {
+      "name": "House Transportation and Infrastructure",
+      "chamber": "house",
+      "code": "hspw00",
+      "tier": 2,
+      "youtube": "https://www.youtube.com/Transport",
+      "website": "https://transportation.house.gov",
+      "hearings_url": "https://transportation.house.gov/calendar/",
+      "scraper_type": "youtube_only",
+      "scrapeable": false,
+      "requires_js": true
+    },
+    "house.oversight": {
+      "name": "House Oversight and Accountability",
+      "chamber": "house",
+      "code": "hsgo00",
+      "tier": 2,
+      "youtube": "https://www.youtube.com/user/oversightandreform",
+      "website": "https://oversight.house.gov",
+      "hearings_url": "https://oversight.house.gov/hearing/",
+      "scraper_type": "wordpress_featured_post",
+      "scrapeable": true,
+      "requires_js": false,
+      "notes": "div.post.featured-post; dates embedded in link text (Month DD, YYYY)"
+    },
+    "house.judiciary": {
+      "name": "House Judiciary",
+      "chamber": "house",
+      "code": "hsju00",
+      "tier": 2,
+      "youtube": "https://www.youtube.com/@USHouseJudiciaryGOP",
+      "website": "https://judiciary.house.gov",
+      "hearings_url": "https://judiciary.house.gov/committee-activity/hearings",
+      "scraper_type": "evo_framework",
+      "scrapeable": true,
+      "requires_js": false,
+      "notes": "/hearings/ returns 403; use /committee-activity/hearings"
+    },
+    "house.armed_services": {
+      "name": "House Armed Services",
+      "chamber": "house",
+      "code": "hsas00",
+      "tier": 2,
+      "youtube": "https://www.youtube.com/@HouseArmedServices",
+      "website": "https://armedservices.house.gov",
+      "hearings_url": "https://armedservices.house.gov/calendar/",
+      "scraper_type": "aspnet_card",
+      "scrapeable": true,
+      "requires_js": false,
+      "notes": "article.article-item with time elements; noscript warning but HTML present"
+    },
+    "house.education_workforce": {
+      "name": "House Education and Workforce",
+      "chamber": "house",
+      "code": "hsed00",
+      "tier": 2,
+      "youtube": "https://www.youtube.com/channel/UC8Ewe7WqGg01KRNjJCO5cjg",
+      "website": "https://edworkforce.house.gov",
+      "hearings_url": "https://edworkforce.house.gov/calendar/list.aspx?EventTypeID=189",
+      "scraper_type": "html_table",
+      "scrapeable": true,
+      "requires_js": false,
+      "notes": "Noscript warning but table content IS in raw HTML"
+    },
+    "house.homeland_security": {
+      "name": "House Homeland Security",
+      "chamber": "house",
+      "code": "hshm00",
+      "tier": 2,
+      "youtube": "https://www.youtube.com/@HouseHomeland",
+      "website": "https://homeland.house.gov",
+      "hearings_url": "https://homeland.house.gov/hearings/",
+      "scraper_type": "tribe_events",
+      "scrapeable": true,
+      "requires_js": false,
+      "notes": "WordPress + Tribe Events plugin; article.tribe-events-calendar-list__event"
+    },
+    "house.natural_resources": {
+      "name": "House Natural Resources",
+      "chamber": "house",
+      "code": "hsii00",
+      "tier": 3,
+      "youtube": "https://www.youtube.com/user/NaturalResourcesGOP",
+      "website": "https://naturalresources.house.gov",
+      "hearings_url": "https://naturalresources.house.gov/calendar/",
+      "scraper_type": "youtube_only",
+      "scrapeable": false,
+      "requires_js": true
+    },
+    "house.veterans_affairs": {
+      "name": "House Veterans' Affairs",
+      "chamber": "house",
+      "code": "hsvr00",
+      "tier": 3,
+      "youtube": "https://www.youtube.com/user/HouseVetsAffairs",
+      "website": "https://veterans.house.gov",
+      "hearings_url": "https://veterans.house.gov/calendar/",
+      "scraper_type": "wordpress_calblocker",
+      "scrapeable": true,
+      "requires_js": false,
+      "notes": "article.calblocker elements; partial JS but HTML present"
+    },
+    "house.rules": {
+      "name": "House Rules",
+      "chamber": "house",
+      "code": "hsru00",
+      "tier": 3,
+      "youtube": "https://www.youtube.com/user/RulesReps",
+      "website": "https://rules.house.gov",
+      "hearings_url": "https://rules.house.gov/media/announcements",
+      "scraper_type": "evo_framework",
+      "scrapeable": true,
+      "requires_js": false,
+      "notes": "Drupal evo; meetings listed under /media/announcements"
+    },
+    "house.intelligence": {
       "name": "House Intelligence (HPSCI)",
+      "chamber": "house",
       "code": "hlig00",
+      "tier": 3,
       "youtube": null,
       "website": "https://intelligence.house.gov",
-      "docs_house_gov": true,
-      "notes": "No confirmed YouTube channel; has videos page but channel URL not discoverable"
-    }
-  },
-  "senate": {
-    "banking": {
-      "name": "Senate Banking, Housing and Urban Affairs",
-      "code": "ssbk00",
-      "youtube": "https://www.youtube.com/@SenBankingGOP",
-      "website": "https://banking.senate.gov",
-      "webcast": "senate_internal",
-      "testimony_url_pattern": "https://www.banking.senate.gov/download/{lastname}-testimony-{MM-DD-YY}"
+      "hearings_url": null,
+      "scraper_type": "youtube_only",
+      "scrapeable": false,
+      "requires_js": false,
+      "notes": "No listing page found; /hearing/ redirects to single event"
     },
-    "finance": {
+
+    "senate.finance": {
       "name": "Senate Finance",
+      "chamber": "senate",
       "code": "ssfi00",
+      "tier": 1,
       "youtube": "https://www.youtube.com/user/SenFinanceMajority",
       "website": "https://finance.senate.gov",
-      "webcast": "senate_internal"
+      "hearings_url": "https://www.finance.senate.gov/hearings",
+      "scraper_type": "drupal_table",
+      "scrapeable": true,
+      "requires_js": false,
+      "date_format": "MM/DD/YY",
+      "has_testimony": true,
+      "has_video": true,
+      "video_comm": "finance"
     },
-    "commerce": {
-      "name": "Senate Commerce, Science and Transportation",
-      "code": "sscm00",
-      "youtube": "https://www.youtube.com/@CommerceRepublicans",
-      "website": "https://commerce.senate.gov",
-      "webcast": "senate_internal"
+    "senate.banking": {
+      "name": "Senate Banking",
+      "chamber": "senate",
+      "code": "ssbk00",
+      "tier": 1,
+      "youtube": "https://www.youtube.com/@SenBankingGOP",
+      "website": "https://banking.senate.gov",
+      "hearings_url": "https://www.banking.senate.gov/hearings",
+      "scraper_type": "drupal_table",
+      "scrapeable": true,
+      "requires_js": false,
+      "date_format": "MM/DD/YY",
+      "has_testimony": true,
+      "has_video": true,
+      "video_comm": "banking"
     },
-    "judiciary": {
-      "name": "Senate Judiciary",
-      "code": "ssju00",
-      "youtube": null,
-      "website": "https://judiciary.senate.gov",
-      "webcast": "senate_internal",
-      "notes": "Uses internal JW Player webcast; no YouTube channel found"
-    },
-    "armed_services": {
-      "name": "Senate Armed Services",
-      "code": "ssas00",
-      "youtube": null,
-      "website": "https://armed-services.senate.gov",
-      "webcast": "senate_internal"
-    },
-    "foreign_relations": {
-      "name": "Senate Foreign Relations",
-      "code": "ssfr00",
-      "youtube": null,
-      "website": "https://foreign.senate.gov",
-      "webcast": "senate_internal"
-    },
-    "intelligence": {
-      "name": "Senate Intelligence (SSCI)",
-      "code": "slin00",
-      "youtube": null,
-      "website": "https://intelligence.senate.gov",
-      "webcast": "senate_internal"
-    },
-    "appropriations": {
-      "name": "Senate Appropriations",
-      "code": "ssap00",
-      "youtube": null,
-      "website": "https://appropriations.senate.gov",
-      "webcast": "senate_internal"
-    },
-    "help": {
-      "name": "Senate HELP",
-      "code": "sshr00",
-      "youtube": null,
-      "website": "https://help.senate.gov",
-      "webcast": "senate_internal",
-      "notes": "Uses JW Player streaming at help.senate.gov"
-    },
-    "budget": {
+    "senate.budget": {
       "name": "Senate Budget",
+      "chamber": "senate",
       "code": "ssbu00",
+      "tier": 1,
       "youtube": null,
       "website": "https://budget.senate.gov",
-      "webcast": "senate_internal"
+      "hearings_url": "https://www.budget.senate.gov/hearings",
+      "scraper_type": "drupal_table",
+      "scrapeable": true,
+      "requires_js": false,
+      "date_format": "MM.DD.YY",
+      "has_testimony": true,
+      "has_video": true,
+      "video_comm": "budget"
     },
-    "homeland_security": {
+    "senate.commerce": {
+      "name": "Senate Commerce, Science and Transportation",
+      "chamber": "senate",
+      "code": "sscm00",
+      "tier": 1,
+      "youtube": "https://www.youtube.com/@CommerceRepublicans",
+      "website": "https://commerce.senate.gov",
+      "hearings_url": "https://www.commerce.senate.gov/hearings",
+      "scraper_type": "drupal_links",
+      "scrapeable": true,
+      "requires_js": false,
+      "date_format": "MM/DD/YYYY",
+      "has_testimony": true,
+      "has_video": true,
+      "video_comm": "commerce"
+    },
+    "senate.appropriations": {
+      "name": "Senate Appropriations",
+      "chamber": "senate",
+      "code": "ssap00",
+      "tier": 2,
+      "youtube": null,
+      "website": "https://appropriations.senate.gov",
+      "hearings_url": "https://www.appropriations.senate.gov/hearings",
+      "scraper_type": "drupal_table",
+      "scrapeable": true,
+      "requires_js": false,
+      "date_format": "MM/DD/YY",
+      "has_testimony": false,
+      "has_video": true,
+      "video_comm": "approps"
+    },
+    "senate.foreign_relations": {
+      "name": "Senate Foreign Relations",
+      "chamber": "senate",
+      "code": "ssfr00",
+      "tier": 2,
+      "youtube": null,
+      "website": "https://foreign.senate.gov",
+      "hearings_url": "https://www.foreign.senate.gov/hearings",
+      "scraper_type": "new_senate_cms",
+      "scrapeable": true,
+      "requires_js": false,
+      "has_testimony": true,
+      "has_video": true,
+      "video_comm": "foreign"
+    },
+    "senate.help": {
+      "name": "Senate HELP",
+      "chamber": "senate",
+      "code": "sshr00",
+      "tier": 2,
+      "youtube": null,
+      "website": "https://help.senate.gov",
+      "hearings_url": "https://www.help.senate.gov/hearings",
+      "scraper_type": "new_senate_cms",
+      "scrapeable": true,
+      "requires_js": false,
+      "date_format": "MM.DD.YY",
+      "has_testimony": false,
+      "has_video": true,
+      "video_comm": "help"
+    },
+    "senate.intelligence": {
+      "name": "Senate Intelligence (SSCI)",
+      "chamber": "senate",
+      "code": "slin00",
+      "tier": 2,
+      "youtube": null,
+      "website": "https://intelligence.senate.gov",
+      "hearings_url": "https://www.intelligence.senate.gov/hearings",
+      "scraper_type": "wordpress_blog",
+      "scrapeable": true,
+      "requires_js": false,
+      "date_format": "Mon DD, YYYY",
+      "has_testimony": true,
+      "has_video": true,
+      "video_comm": "intel",
+      "notes": "WordPress Divi theme; redirects to /hearings-meetings/; date in URL path"
+    },
+    "senate.homeland_security": {
       "name": "Senate Homeland Security and Governmental Affairs",
+      "chamber": "senate",
       "code": "ssga00",
+      "tier": 2,
       "youtube": null,
       "website": "https://hsgac.senate.gov",
-      "webcast": "senate_internal",
-      "notes": "Has Rumble channel but no YouTube"
+      "hearings_url": "https://www.hsgac.senate.gov/hearings",
+      "scraper_type": "wordpress_elementor",
+      "scrapeable": true,
+      "requires_js": true,
+      "date_format": "MM/DD/YYYY",
+      "has_testimony": false,
+      "has_video": true,
+      "video_comm": "hsgac",
+      "notes": "WordPress + Elementor + JetEngine; partially rendered in HTML"
     },
-    "environment": {
+    "senate.environment": {
       "name": "Senate Environment and Public Works",
+      "chamber": "senate",
       "code": "ssev00",
+      "tier": 2,
       "youtube": null,
       "website": "https://epw.senate.gov",
-      "webcast": "senate_internal"
-    }
-  },
-  "other": {
-    "cspan": {
-      "name": "C-SPAN",
-      "youtube": "https://www.youtube.com/user/CSPAN",
-      "notes": "Selective coverage of hearings, not comprehensive. Clips and highlights, not always full recordings. Full archives at c-span.org."
+      "hearings_url": "https://www.epw.senate.gov/public/index.cfm/hearings",
+      "scraper_type": "coldfusion_table",
+      "scrapeable": true,
+      "requires_js": false,
+      "date_format": "M/D/YY",
+      "has_testimony": true,
+      "has_video": true,
+      "video_comm": "epw",
+      "notes": "ColdFusion; /hearings alone returns 404; must use /public/index.cfm/hearings"
     },
-    "house_clerk": {
-      "name": "House Clerk (floor proceedings)",
-      "youtube": "https://www.youtube.com/USHouseClerk/live",
-      "notes": "Floor proceedings only, not committee hearings"
+    "senate.judiciary": {
+      "name": "Senate Judiciary",
+      "chamber": "senate",
+      "code": "ssju00",
+      "tier": 2,
+      "youtube": null,
+      "website": "https://judiciary.senate.gov",
+      "hearings_url": "https://www.judiciary.senate.gov/hearings",
+      "scraper_type": "new_senate_cms",
+      "scrapeable": true,
+      "requires_js": false,
+      "date_format": "MM.DD.YY",
+      "has_testimony": false,
+      "has_video": true,
+      "video_comm": "judiciary",
+      "notes": "Redirects to /committee-activity/hearings"
+    },
+    "senate.armed_services": {
+      "name": "Senate Armed Services",
+      "chamber": "senate",
+      "code": "ssas00",
+      "tier": 2,
+      "youtube": null,
+      "website": "https://armed-services.senate.gov",
+      "hearings_url": "https://www.armed-services.senate.gov/hearings",
+      "scraper_type": "new_senate_cms",
+      "scrapeable": true,
+      "requires_js": false,
+      "date_format": "MM.DD.YY",
+      "has_testimony": false,
+      "has_video": true,
+      "video_comm": "armed"
+    },
+    "senate.agriculture": {
+      "name": "Senate Agriculture",
+      "chamber": "senate",
+      "code": "ssag00",
+      "tier": 2,
+      "youtube": null,
+      "website": "https://agriculture.senate.gov",
+      "hearings_url": "https://www.agriculture.senate.gov/hearings",
+      "scraper_type": "new_senate_cms",
+      "scrapeable": true,
+      "requires_js": false,
+      "has_testimony": false,
+      "has_video": true,
+      "video_comm": "ag"
+    },
+    "senate.energy": {
+      "name": "Senate Energy and Natural Resources",
+      "chamber": "senate",
+      "code": "ssen00",
+      "tier": 2,
+      "youtube": null,
+      "website": "https://energy.senate.gov",
+      "hearings_url": "https://www.energy.senate.gov/hearings",
+      "scraper_type": "drupal_links",
+      "scrapeable": true,
+      "requires_js": false,
+      "has_testimony": true,
+      "has_video": true,
+      "video_comm": "energy"
+    },
+    "senate.veterans": {
+      "name": "Senate Veterans Affairs",
+      "chamber": "senate",
+      "code": "ssva00",
+      "tier": 3,
+      "youtube": null,
+      "website": "https://veterans.senate.gov",
+      "hearings_url": "https://www.veterans.senate.gov/hearings",
+      "scraper_type": "drupal_links",
+      "scrapeable": true,
+      "requires_js": false,
+      "has_testimony": true,
+      "has_video": true,
+      "video_comm": "vetaff"
+    },
+    "senate.small_business": {
+      "name": "Senate Small Business",
+      "chamber": "senate",
+      "code": "sssb00",
+      "tier": 2,
+      "youtube": null,
+      "website": "https://sbc.senate.gov",
+      "hearings_url": "https://www.sbc.senate.gov/public/index.cfm/hearings",
+      "scraper_type": "coldfusion_table",
+      "scrapeable": true,
+      "requires_js": false,
+      "date_format": "M/D/YY",
+      "has_testimony": true,
+      "has_video": true,
+      "video_comm": "smbiz",
+      "notes": "ColdFusion; /hearings alone returns 404; must use /public/index.cfm/hearings"
+    },
+    "senate.rules": {
+      "name": "Senate Rules and Administration",
+      "chamber": "senate",
+      "code": "ssra00",
+      "tier": 3,
+      "youtube": null,
+      "website": "https://rules.senate.gov",
+      "hearings_url": "https://www.rules.senate.gov/hearings",
+      "scraper_type": "new_senate_cms",
+      "scrapeable": true,
+      "requires_js": false,
+      "has_testimony": false,
+      "has_video": true,
+      "video_comm": "rules",
+      "notes": "Redirects to /hearings/list; many entries are business meetings"
     }
   },
   "aggregation_points": {
