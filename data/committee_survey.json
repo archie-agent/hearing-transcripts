@@ -1,0 +1,416 @@
+[
+  {
+    "committee_key": "house.ways_and_means",
+    "name": "House Ways and Means",
+    "hearings_url": "https://waysandmeans.house.gov/hearings/",
+    "status_code": 200,
+    "requires_js": false,
+    "scrapeable": true,
+    "html_pattern": "div.single-event > div.date-block (span.month, span.day, span.year) + div.info > a[title link]",
+    "date_format": "Structured spans: span.month ('February'), span.day ('10'), span.year ('2026')",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 13,
+    "sample_titles": [
+      "Full Committee Hearing on Foreign Influence in American Non-profits: Unmasking Threats from Beijing and Beyond",
+      "Full Committee Hearing with Health Insurance CEOs",
+      "Work & Welfare Subcommittee Hearing on Strengthening the Child Support Enforcement Program"
+    ],
+    "notes": "WordPress-based; div.single-event with date-block spans and info div; paginated (9 pages); individual hearing URLs like /event/[slug]"
+  },
+  {
+    "committee_key": "house.financial_services",
+    "name": "House Financial Services",
+    "hearings_url": "https://financialservices.house.gov/calendar/",
+    "status_code": 200,
+    "requires_js": "partial",
+    "scrapeable": true,
+    "html_pattern": "article.card-h-event > a[href to EventSingle.aspx] + time[datetime]",
+    "date_format": "<time datetime='2025-02-12'> (ISO date)",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 29,
+    "sample_titles": [
+      "Hearing Entitled: Priced Out of the American Dream: Understanding the Policies Behind Rising Costs of Housing and Borrowing",
+      "Hearing Entitled: Building a Solid Foundation: Restoring Trust and Transparency in Public Housing Agencies",
+      "Hearing Entitled: Oversight of the Securities and Exchange Commission"
+    ],
+    "notes": "Noscript says 'Javascript must be enabled' but article.card-h-event elements ARE present in raw HTML with titles, dates, and links; 29 articles found; links to /calendar/EventSingle.aspx?EventID=NNNNNN"
+  },
+  {
+    "committee_key": "house.energy_commerce",
+    "name": "House Energy and Commerce",
+    "hearings_url": "https://energycommerce.house.gov/calendars",
+    "status_code": 200,
+    "requires_js": true,
+    "scrapeable": false,
+    "html_pattern": "Next.js SSR with __NEXT_DATA__ JSON; no calendar items in raw HTML",
+    "date_format": "N/A (JS-rendered)",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": false,
+      "titles": false,
+      "links": false
+    },
+    "hearing_count_found": 0,
+    "sample_titles": [],
+    "notes": "Next.js/React SPA; /hearings/ returns 404; /calendars returns 200 but calendar items are JS-rendered; __NEXT_DATA__ contains only category metadata, not calendar entries; would require headless browser or API discovery"
+  },
+  {
+    "committee_key": "house.budget",
+    "name": "House Budget",
+    "hearings_url": "https://budget.house.gov/hearings/",
+    "status_code": 200,
+    "requires_js": false,
+    "scrapeable": true,
+    "html_pattern": "table > tr > td[title + link] + td[location] + td[date]; links to /hearing/[slug]",
+    "date_format": "MM/DD/YY HH:MMA in table cells (e.g., '01/21/26 10:15AM'); also <time datetime='2026-01-21T10:15'>",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 26,
+    "sample_titles": [
+      "Full Committee Hearing: HEARING NOTICE: Reverse the Curse: Skyrocketing Healthcare Costs",
+      "Full Committee Hearing: HEARING NOTICE: Member Day Hearing",
+      "Full Committee Hearing: Oversight of the Congressional Budget Office"
+    ],
+    "notes": "Clean table-based layout; 26 hearing rows; links to /hearing/[slug]; no testimony PDFs on listing page"
+  },
+  {
+    "committee_key": "house.appropriations",
+    "name": "House Appropriations",
+    "hearings_url": "https://appropriations.house.gov/schedule/hearings",
+    "status_code": 200,
+    "requires_js": false,
+    "scrapeable": true,
+    "html_pattern": "div.views-field.views-field-nothing > div.h3.mt-0.font-weight-bold > a[title link] + div.evo-hearing__field-evo-meeting-date > time[datetime]",
+    "date_format": "<time datetime='2026-02-10T15:30:00Z'> with text 'Tuesday, February 10, 2026 - 10:30 AM'",
+    "has_testimony_links": true,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 12,
+    "sample_titles": [
+      "Hearing: The Science of Reading",
+      "Oversight Hearing - Potential DHS Shutdown Impacts",
+      "Oversight Hearing - U.S. Department of Agriculture, Office of Inspector General"
+    ],
+    "notes": "Drupal-based (evo framework); /events/hearings/ redirects to /schedule/hearings; 12 entries with dates, titles, locations, and links; links to /schedule/hearings/[slug]"
+  },
+  {
+    "committee_key": "house.agriculture",
+    "name": "House Agriculture",
+    "hearings_url": "https://agriculture.house.gov/calendar/?Timeframe=All",
+    "status_code": 200,
+    "requires_js": true,
+    "scrapeable": false,
+    "html_pattern": "No listing elements in raw HTML; JS-rendered calendar",
+    "date_format": "N/A (JS-rendered)",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": false,
+      "titles": false,
+      "links": false
+    },
+    "hearing_count_found": 0,
+    "sample_titles": [],
+    "notes": "Legacy ASP.NET-style site; /hearings/ redirects to /calendar/?Timeframe=All; calendar content is JavaScript-rendered; requires headless browser"
+  },
+  {
+    "committee_key": "house.foreign_affairs",
+    "name": "House Foreign Affairs",
+    "hearings_url": "https://foreignaffairs.house.gov/committee-activity/hearings/all",
+    "status_code": 200,
+    "requires_js": false,
+    "scrapeable": true,
+    "html_pattern": "div.media.evo-media-object.mt-2.mb-4 > div.media-body > div.h5 > a[title link] + div.evo-hearing__field-evo-meeting-date > time[datetime]",
+    "date_format": "<time datetime='2026-02-11T19:00:00Z'> with text 'Wed, 02/11/2026 - 2:00 PM'",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 10,
+    "sample_titles": [
+      "South Asia: U.S. Foreign Policy in the Region",
+      "Weaponized Mass Migration: A Security Risk to Europe and the United States",
+      "Advancing Peace in DRC and Rwanda through President Trump's Deal-Making"
+    ],
+    "notes": "Drupal-based (evo framework); standard /hearings/ returns 404; correct path is /committee-activity/hearings/all; each entry has subcommittee info; links to /committee-activity/hearings/[slug]"
+  },
+  {
+    "committee_key": "house.science",
+    "name": "House Science, Space, Technology",
+    "hearings_url": "https://science.house.gov/hearings/",
+    "status_code": 200,
+    "requires_js": false,
+    "scrapeable": true,
+    "html_pattern": "Multiple tables with headers [Date, Time, Title]; grouped by subcommittee sections",
+    "date_format": "MM/DD/YYYY in table cells",
+    "has_testimony_links": true,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 4,
+    "sample_titles": [],
+    "notes": "Table-based listing grouped by subcommittee; links to Opening Statements; multiple small tables with Date/Time/Title headers; relatively few current hearings"
+  },
+  {
+    "committee_key": "house.small_business",
+    "name": "House Small Business",
+    "hearings_url": "https://smallbusiness.house.gov/calendar/",
+    "status_code": 200,
+    "requires_js": true,
+    "scrapeable": false,
+    "html_pattern": "No listing elements in raw HTML; JS-rendered calendar",
+    "date_format": "N/A (JS-rendered)",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": false,
+      "titles": false,
+      "links": false
+    },
+    "hearing_count_found": 0,
+    "sample_titles": [],
+    "notes": "Legacy ASP.NET-style site; /hearings/ redirects to /calendar/list.aspx?EventTypeID=253 (404); /calendar/ returns 200 but content is JS-rendered; requires headless browser"
+  },
+  {
+    "committee_key": "house.transportation",
+    "name": "House Transportation",
+    "hearings_url": "https://transportation.house.gov/calendar/",
+    "status_code": 200,
+    "requires_js": false,
+    "scrapeable": false,
+    "html_pattern": "No clear hearing listing pattern; page has navigation/footer content but no event entries in HTML",
+    "date_format": "Month DD, YYYY visible in text but not in structured listing elements",
+    "has_testimony_links": true,
+    "extractable": {
+      "dates": false,
+      "titles": false,
+      "links": false
+    },
+    "hearing_count_found": 0,
+    "sample_titles": [],
+    "notes": "Legacy ASP.NET-style; /calendar/ returns 200 but calendar entries appear JS-rendered; only statement links visible in raw HTML, not hearing listings; /hearings/ returns 404"
+  },
+  {
+    "committee_key": "house.oversight",
+    "name": "House Oversight",
+    "hearings_url": "https://oversight.house.gov/hearing/",
+    "status_code": 200,
+    "requires_js": false,
+    "scrapeable": true,
+    "html_pattern": "div.post.featured-post > div.category + div.title + div.excerpt; links to /hearing/[slug]; 10 per page with pagination",
+    "date_format": "Dates embedded in link text (e.g., 'HearingDoing More with Less...February 5, 2026'); Month DD, YYYY (text)",
+    "has_testimony_links": true,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 10,
+    "sample_titles": [
+      "Doing More with Less: Deleting Duplicative Programs",
+      "Housing Affordability: Saving the American Dream",
+      "Declassified MLK Records: What They Reveal and Why They Matter"
+    ],
+    "notes": "WordPress-based; div.post.featured-post entries with category/title/excerpt; dates in link text not structured spans; links to full /hearing/[slug] URLs; paginated; testimony PDFs on individual pages"
+  },
+  {
+    "committee_key": "house.judiciary",
+    "name": "House Judiciary",
+    "hearings_url": "https://judiciary.house.gov/committee-activity/hearings",
+    "status_code": 200,
+    "requires_js": false,
+    "scrapeable": true,
+    "html_pattern": "div.media.evo-media-object.mt-4.mb-4 > div.media-body > div.h3.mt-0.font-weight-bold > a[title link] + div.evo-hearing__field-evo-meeting-date > time[datetime]",
+    "date_format": "<time datetime='2026-02-10T14:00:00Z'> with text 'Tue, 02/10/2026 - 2:00 PM'",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 7,
+    "sample_titles": [
+      "Sharia-Free America: Why Political Islam & Sharia Law Are Incompatible with the U.S. Constitution",
+      "Oversight of the U.S Department of Justice",
+      "Europe's Threat to American Speech and Innovation: Part II"
+    ],
+    "notes": "Drupal-based (evo framework); /hearings/ returns 403; /calendar returns static page; best URL is /committee-activity/hearings; same evo-media-object pattern as Foreign Affairs but with mt-4 spacing; includes location info"
+  },
+  {
+    "committee_key": "house.armed_services",
+    "name": "House Armed Services",
+    "hearings_url": "https://armedservices.house.gov/calendar/",
+    "status_code": 200,
+    "requires_js": "partial",
+    "scrapeable": true,
+    "html_pattern": "article.article-item > a[href to EventSingle.aspx] + time[datetime text]",
+    "date_format": "<time> with text like 'Friday, February 6, 2026 - 2:00PM'",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 5,
+    "sample_titles": [
+      "Joint SPF/RDY Hearing: V-22 Osprey Program Update",
+      "FULL Committee Hearing: Reforming Defense Acquisition to Deliver Capability at the Speed of Relevance",
+      "Full Committee Markup: FY26 NDAA"
+    ],
+    "notes": "Noscript says 'Javascript must be enabled' but article.article-item elements ARE in raw HTML with titles, dates, links; links to EventSingle.aspx?EventID=NNNN; includes markups alongside hearings"
+  },
+  {
+    "committee_key": "house.education_workforce",
+    "name": "House Education and Workforce",
+    "hearings_url": "https://edworkforce.house.gov/calendar/list.aspx?EventTypeID=189",
+    "status_code": 200,
+    "requires_js": "partial",
+    "scrapeable": true,
+    "html_pattern": "table > tr with hearing title cells; 104+ rows; titles in td elements with links",
+    "date_format": "Month DD, YYYY in text within table cells",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 104,
+    "sample_titles": [
+      "Work, Dignity, and Choice in Disability Employment",
+      "Building an AI-Ready America: Safer Workplaces Through Smarter Technology",
+      "Defending Faith and Families Against Government Overreach"
+    ],
+    "notes": "Noscript says 'Javascript must be enabled' but table content IS in raw HTML; /hearings/ redirects to this URL; 104 hearing entries in table format; very large dataset spanning multiple congresses"
+  },
+  {
+    "committee_key": "house.homeland_security",
+    "name": "House Homeland Security",
+    "hearings_url": "https://homeland.house.gov/hearings/",
+    "status_code": 200,
+    "requires_js": false,
+    "scrapeable": true,
+    "html_pattern": "article.tribe-events-calendar-list__event > h3.tribe-events-calendar-list__event-title > a[href] + time[datetime]",
+    "date_format": "<time datetime='2026-02-10'> with text 'February 10 - 10:00 am-1:00 pm'",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 2,
+    "sample_titles": [
+      "Oversight of the Department of Homeland Security: ICE, CBP, and USCIS",
+      "Surveying the Threat of Agroterrorism, Part II: Assessing Federal Government Efforts"
+    ],
+    "notes": "WordPress-based with Tribe Events calendar plugin; article elements with tribe-events classes; links to full /hearing/[slug] URLs; clean extractable structure"
+  },
+  {
+    "committee_key": "house.natural_resources",
+    "name": "House Natural Resources",
+    "hearings_url": "https://naturalresources.house.gov/calendar/",
+    "status_code": 200,
+    "requires_js": true,
+    "scrapeable": false,
+    "html_pattern": "No listing elements in raw HTML; JS-rendered calendar",
+    "date_format": "N/A (JS-rendered)",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": false,
+      "titles": false,
+      "links": false
+    },
+    "hearing_count_found": 0,
+    "sample_titles": [],
+    "notes": "Legacy ASP.NET-style; /hearings/ redirects to /calendar/list.aspx?EventTypeID=510 (404); /calendar/ returns 200 but calendar entries are JS-rendered; requires headless browser"
+  },
+  {
+    "committee_key": "house.veterans_affairs",
+    "name": "House Veterans Affairs",
+    "hearings_url": "https://veterans.house.gov/calendar/",
+    "status_code": 200,
+    "requires_js": "partial",
+    "scrapeable": true,
+    "html_pattern": "article.calblocker > title text + date text; 10 articles found",
+    "date_format": "Month DD, YYYY in text (e.g., dates embedded in article content)",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 10,
+    "sample_titles": [
+      "Full Committee Markup",
+      "Full Committee Oversight Hearing",
+      "Joint Subcommittee on Technology Modernization and Subcommittee on Economic Opportunity Oversight Hearing"
+    ],
+    "notes": "Noscript says 'Javascript must be enabled' but article.calblocker elements ARE in raw HTML with titles and basic dates; includes markups alongside hearings; limited date structure"
+  },
+  {
+    "committee_key": "house.rules",
+    "name": "House Rules",
+    "hearings_url": "https://rules.house.gov/media/announcements",
+    "status_code": 200,
+    "requires_js": false,
+    "scrapeable": true,
+    "html_pattern": "h2 > a[title link to /media/announcement/[slug]] + div.field-content + time[datetime]; Drupal evo-default-content pattern",
+    "date_format": "<time datetime='2026-02-06T13:15:54-05:00'> with text 'February 6, 2026'",
+    "has_testimony_links": false,
+    "extractable": {
+      "dates": true,
+      "titles": true,
+      "links": true
+    },
+    "hearing_count_found": 6,
+    "sample_titles": [
+      "Meeting Announcement for February 10, 2026",
+      "Meeting Announcement For February 9, 2026",
+      "Meeting Announcement For February 2, 2026"
+    ],
+    "notes": "Drupal-based (evo framework); no /hearings/ or /calendar/ paths; meetings listed under /media/announcements; these are meeting announcements not traditional hearing listings; links to /media/announcement/[slug]"
+  },
+  {
+    "committee_key": "house.intelligence",
+    "name": "House Intelligence",
+    "hearings_url": "https://intelligence.house.gov/hearing/",
+    "status_code": 200,
+    "requires_js": false,
+    "scrapeable": false,
+    "html_pattern": "Redirects to individual hearing event page, not a listing; no hearing listing URL found",
+    "date_format": "Month DD, YYYY (text on individual page)",
+    "has_testimony_links": true,
+    "extractable": {
+      "dates": false,
+      "titles": false,
+      "links": false
+    },
+    "hearing_count_found": 0,
+    "sample_titles": [],
+    "testimony_samples": [
+      {
+        "href": "https://republicans-intelligence.house.gov/UploadedFiles/HHRG-118-IG00-20230309-SD001.pdf",
+        "text": "PDF"
+      }
+    ],
+    "notes": "WordPress-based; /hearing/ redirects to a single hearing event page (not a listing); /hearings/ returns 404; /calendar/ returns 404; no discoverable hearing listing URL; may require API or sitemap discovery"
+  }
+]
