@@ -12,8 +12,6 @@ import re
 import time as _time
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote_plus, urlparse
-
 import config
 
 log = logging.getLogger(__name__)
