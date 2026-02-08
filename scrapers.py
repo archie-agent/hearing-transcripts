@@ -183,7 +183,9 @@ def scrape_new_senate_cms(html: str, base_url: str, cutoff: datetime) -> list[Sc
         if "?" in href or "#" in href:
             continue
 
-        title = link.get_text(strip=True)
+        # New Senate CMS wraps entire card in <a> — prefer title-specific element
+        title_el = link.select_one(".LegislationList__title, .ArticleTitle")
+        title = title_el.get_text(strip=True) if title_el else link.get_text(strip=True)
         if not title or len(title) < 15:
             continue
 
@@ -198,6 +200,13 @@ def scrape_new_senate_cms(html: str, base_url: str, cutoff: datetime) -> list[Sc
         if slug_date:
             month, day, year = slug_date.groups()
             hearing_date = f"{year}-{month}-{day}"
+
+        # Try <time> element inside the link (new Senate CMS)
+        if not hearing_date:
+            time_el = link.find("time")
+            if time_el:
+                dt_attr = time_el.get("datetime", "")
+                hearing_date = parse_date(dt_attr) or parse_date(time_el.get_text(strip=True))
 
         # Try surrounding text for dates
         if not hearing_date:
