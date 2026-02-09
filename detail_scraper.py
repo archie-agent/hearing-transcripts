@@ -16,6 +16,7 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
+from isvp import extract_isvp_url
 from utils import RateLimiter, get_http_client
 
 log = logging.getLogger(__name__)
@@ -544,13 +545,20 @@ def scrape_hearing_detail(
     committee_key: str,
     detail_url: str,
     committee_meta: dict,
+    sources: dict | None = None,
 ) -> list[str]:
     """Fetch a hearing detail page and extract testimony PDF URLs.
+
+    Also checks for Senate ISVP video iframes.  When found, the ISVP
+    comm/filename parameters are written into *sources* (if provided) as
+    ``isvp_comm`` and ``isvp_filename``.
 
     Args:
         committee_key: Dotted key like "senate.finance".
         detail_url: The hearing detail page URL (website_url from sources).
         committee_meta: Committee metadata dict from committees.json.
+        sources: Optional mutable dict; ISVP params are injected here when
+            an ISVP iframe is detected on the page.
 
     Returns:
         List of absolute PDF URLs found on the detail page, or empty list.
@@ -566,6 +574,22 @@ def scrape_hearing_detail(
     # Determine the base URL (may differ from detail_url after redirects)
     base_url = detail_url
 
+    # -------------------------------------------------------------------
+    # ISVP iframe detection (Senate committees only)
+    # -------------------------------------------------------------------
+    if sources is not None and committee_meta.get("chamber") == "senate":
+        isvp_params = extract_isvp_url(html)
+        if isvp_params:
+            sources["isvp_comm"] = isvp_params["comm"]
+            sources["isvp_filename"] = isvp_params["filename"]
+            log.info(
+                "ISVP iframe detected for %s: comm=%s filename=%s",
+                committee_key, isvp_params["comm"], isvp_params["filename"],
+            )
+
+    # -------------------------------------------------------------------
+    # Testimony PDF extraction
+    # -------------------------------------------------------------------
     # Select the platform-specific extractor
     scraper_type = committee_meta.get("scraper_type", "")
     extractor = _EXTRACTOR_REGISTRY.get(scraper_type)
