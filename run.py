@@ -93,7 +93,32 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
         state.mark_step(hearing.id, "captions", "done")
         state.mark_step(hearing.id, "cleanup", "done")
 
-    # 1.5. C-SPAN broadcast captions
+    # 1.5. Senate ISVP captions (broadcast-quality stenographer captions)
+    isvp_comm = hearing.sources.get("isvp_comm")
+    isvp_filename = hearing.sources.get("isvp_filename")
+    if isvp_comm and isvp_filename:
+        if not state.is_step_done(hearing.id, "isvp_fetched"):
+            state.mark_step(hearing.id, "isvp", "running")
+            try:
+                from isvp import fetch_isvp_captions
+                isvp_text = fetch_isvp_captions(isvp_comm, isvp_filename)
+                if isvp_text:
+                    isvp_path = hearing_dir / "isvp_transcript.txt"
+                    isvp_path.write_text(isvp_text)
+                    result["outputs"]["isvp_transcript"] = str(isvp_path)
+                    state.mark_step(hearing.id, "isvp_fetched", "done")
+                    log.info(
+                        "ISVP captions: %d chars for %s",
+                        len(isvp_text), hearing.id,
+                    )
+                state.mark_step(hearing.id, "isvp", "done")
+            except Exception as e:
+                state.mark_step(hearing.id, "isvp", "failed", error=str(e))
+                log.error("ISVP caption fetch failed for %s: %s", hearing.id, e)
+        else:
+            log.debug("ISVP transcript already fetched for %s", hearing.id)
+
+    # 1.6. C-SPAN broadcast captions
     cspan_url = hearing.sources.get("cspan_url")
     if cspan_url:
         # Use "cspan_fetched" (transcript actually obtained) not "cspan" (step attempted).
@@ -180,8 +205,9 @@ def _publish_to_transcripts(hearing: Hearing, run_hearing_dir: Path, result: dic
     # Determine best transcript by priority:
     #   1. GovInfo official transcript (authoritative, months delayed)
     #   2. C-SPAN broadcast captions (professional stenographers, immediate)
-    #   3. YouTube + LLM diarized (ASR quality, LLM-improved)
-    #   4. Raw YouTube captions (worst)
+    #   3. Senate ISVP captions (broadcast-quality CART/stenographer)
+    #   4. YouTube + LLM diarized (ASR quality, LLM-improved)
+    #   5. Raw YouTube captions (worst)
     best_transcript = None
 
     # Priority 1: GovInfo official transcript
@@ -194,6 +220,12 @@ def _publish_to_transcripts(hearing: Hearing, run_hearing_dir: Path, result: dic
         cspan_path = result.get("outputs", {}).get("cspan_transcript")
         if cspan_path:
             best_transcript = Path(cspan_path)
+
+    # Priority 3: Senate ISVP captions
+    if best_transcript is None:
+        isvp_path = result.get("outputs", {}).get("isvp_transcript")
+        if isvp_path:
+            best_transcript = Path(isvp_path)
 
     # Priority 3-4: YouTube cleaned or raw captions
     if best_transcript is None:
@@ -329,6 +361,10 @@ def main():
                 # Re-process hearings that gained a C-SPAN URL since last run
                 new_hearings.append(h)
                 log.debug("Re-processing %s: new C-SPAN URL", h.id)
+            elif h.sources.get("isvp_comm") and not state.is_step_done(h.id, "isvp_fetched"):
+                # Re-process hearings that gained ISVP params since last run
+                new_hearings.append(h)
+                log.debug("Re-processing %s: new ISVP params", h.id)
 
     log.info("Found %d hearings (%d new):", len(hearings), len(new_hearings))
     for h in hearings:
@@ -364,13 +400,15 @@ def main():
         n_test = len(r.get("outputs", {}).get("testimony", []))
         has_gov = bool(r.get("outputs", {}).get("govinfo_transcript"))
         has_cspan = bool(r.get("outputs", {}).get("cspan_transcript"))
+        has_isvp = bool(r.get("outputs", {}).get("isvp_transcript"))
         cost_usd = r.get("cost", {}).get("total_usd", 0)
         log.info(
-            "[%d/%d] %s | cap=%s clean=%s cspan=%s testy=%d gov=%s $%.4f",
+            "[%d/%d] %s | cap=%s clean=%s cspan=%s isvp=%s testy=%d gov=%s $%.4f",
             i, n_total, r["title"][:50],
             "Y" if has_cap else "-",
             "Y" if has_clean else "-",
             "Y" if has_cspan else "-",
+            "Y" if has_isvp else "-",
             n_test,
             "Y" if has_gov else "-",
             cost_usd,
@@ -485,14 +523,16 @@ def main():
         has_captions = bool(audio.get("captions")) if isinstance(audio, dict) else False
         has_cleaned = bool(audio.get("cleaned_transcript")) if isinstance(audio, dict) else False
         has_cspan = bool(outputs.get("cspan_transcript"))
+        has_isvp = bool(outputs.get("isvp_transcript"))
         n_testimony = len(outputs.get("testimony", []))
         has_govinfo = bool(outputs.get("govinfo_transcript"))
         log.info(
-            "  %s | captions=%s cleaned=%s cspan=%s testimony=%d govinfo=%s | $%.4f",
+            "  %s | captions=%s cleaned=%s cspan=%s isvp=%s testimony=%d govinfo=%s | $%.4f",
             r["title"][:50],
             "yes" if has_captions else "no",
             "yes" if has_cleaned else "no",
             "yes" if has_cspan else "no",
+            "yes" if has_isvp else "no",
             n_testimony,
             "yes" if has_govinfo else "no",
             r.get("cost", {}).get("total_usd", 0),

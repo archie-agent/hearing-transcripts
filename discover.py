@@ -1009,10 +1009,15 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
         if not website_url:
             continue
         meta = committees.get(hearing.committee_key, {})
-        if not meta.get("has_testimony", False) and not meta.get("scrapeable", False):
+        is_senate = meta.get("chamber") == "senate"
+        can_scrape = meta.get("has_testimony", False) or meta.get("scrapeable", False)
+        if not can_scrape and not is_senate:
             continue
         try:
-            pdf_urls = scrape_hearing_detail(hearing.committee_key, website_url, meta)
+            pdf_urls = scrape_hearing_detail(
+                hearing.committee_key, website_url, meta,
+                sources=hearing.sources,
+            )
             if pdf_urls:
                 hearing.sources["testimony_pdf_urls"] = pdf_urls
         except Exception as e:
