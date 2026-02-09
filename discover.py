@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -33,6 +34,12 @@ _YT_DLP_ENV = {**os.environ, "PATH": f"{_VENV_BIN}:{_SYS_BIN}:{_DENO_DIR}:{os.en
 # Rate limiting: track last request time per domain
 _last_request: dict[str, float] = {}
 _MIN_DELAY = 1.5  # seconds between requests to same domain (DEMO_KEY: 40 req/min)
+
+# Serialize yt-dlp calls across threads.  YouTube silently returns empty
+# results when hit with many concurrent requests — a single lock ensures
+# only one committee scans at a time while website scraping continues in
+# parallel via the thread pool.
+_yt_dlp_lock = threading.Lock()
 
 
 def _rate_limit(url: str) -> None:
@@ -205,34 +212,42 @@ def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hear
         tabs.append(f"{ch_url}/streams")
 
     all_stdout = ""
-    for tab_url in tabs:
-        try:
-            result = subprocess.run(
-                [
-                    "yt-dlp",
-                    "--remote-components", "ejs:github",
-                    "--no-download",
-                    "--print", "%(id)s\t%(title)s\t%(upload_date)s\t%(duration)s",
-                    "--dateafter", cutoff_str,
-                    "--playlist-end", "50",
-                    "--match-filter", "!is_live & !is_upcoming",
-                    tab_url,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=_YT_DLP_ENV,
-            )
-            all_stdout += result.stdout
-            if result.returncode != 0 and not result.stdout.strip():
-                stderr = result.stderr.strip()
-                if stderr:
-                    log.warning("yt-dlp errors for %s: %s", committee_key, stderr[:200])
-        except FileNotFoundError as e:
-            log.error("CRITICAL: yt-dlp not found! %s", e)
-            raise
-        except subprocess.TimeoutExpired as e:
-            log.warning("yt-dlp timed out for %s (%s): %s", committee_key, tab_url, e)
+    with _yt_dlp_lock:
+        for tab_url in tabs:
+            try:
+                result = subprocess.run(
+                    [
+                        "yt-dlp",
+                        "--remote-components", "ejs:github",
+                        "--no-download",
+                        "--print", "%(id)s\t%(title)s\t%(upload_date)s\t%(duration)s",
+                        "--dateafter", cutoff_str,
+                        "--playlist-end", "50",
+                        "--match-filter", "!is_live & !is_upcoming",
+                        tab_url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    env=_YT_DLP_ENV,
+                )
+                all_stdout += result.stdout
+                if result.returncode != 0 and not result.stdout.strip():
+                    stderr = result.stderr.strip()
+                    if stderr:
+                        log.warning("yt-dlp errors for %s: %s", committee_key, stderr[:200])
+            except FileNotFoundError as e:
+                log.error("CRITICAL: yt-dlp not found! %s", e)
+                raise
+            except subprocess.TimeoutExpired as e:
+                log.warning("yt-dlp timed out for %s (%s): %s", committee_key, tab_url, e)
+        # Brief pause before releasing lock so the next committee's scan
+        # doesn't hammer YouTube immediately after this one finishes.
+        _time.sleep(1.0)
+
+    if not all_stdout.strip():
+        log.warning("YouTube: 0 results for %s (%d channel(s) scanned)",
+                     committee_key, len(channels))
 
     hearings = []
     seen_ids: set[str] = set()
@@ -1146,13 +1161,25 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
 # Deduplication
 # ---------------------------------------------------------------------------
 
+def _adjacent_date(date_str: str, offset: int) -> str:
+    """Return YYYY-MM-DD string offset by ±N days."""
+    dt = datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=offset)
+    return dt.strftime("%Y-%m-%d")
+
+
+def _has_youtube_source(h: Hearing) -> bool:
+    return "youtube_id" in h.sources
+
+
 def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
     """Merge hearings that appear to be the same event from different sources.
 
-    Two-pass dedup:
+    Three-pass dedup:
     1. Exact match on (committee_key, date, normalized_title).
     2. Fuzzy match within (committee_key, date) groups — same committee + same
        date is a strong prior, so a lower similarity bar (0.30) suffices.
+    3. Adjacent-date fuzzy match (±1 day) for YouTube entries — YouTube upload
+       dates often differ from the actual hearing date by one day.
     """
     merged: dict[str, Hearing] = {}
 
@@ -1177,6 +1204,32 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
                 if _title_similarity(h.title, existing.title) >= 0.30:
                     fuzzy_match = existing
                     break
+
+            # Adjacent-date fuzzy: YouTube upload dates are often 1 day after
+            # the actual hearing.  If either side has YouTube sources, try ±1 day
+            # with a higher similarity bar (0.45) to avoid false merges.
+            if not fuzzy_match:
+                for offset in (-1, 1):
+                    adj_date = _adjacent_date(h.date, offset)
+                    adj_prefix = f"{h.committee_key}:{adj_date}:"
+                    for key, existing in merged.items():
+                        if not key.startswith(adj_prefix):
+                            continue
+                        # Only do adjacent-date merge when YouTube is involved
+                        if not (_has_youtube_source(h) or _has_youtube_source(existing)):
+                            continue
+                        if _title_similarity(h.title, existing.title) >= 0.45:
+                            fuzzy_match = existing
+                            # Prefer the earlier date (actual hearing date)
+                            if h.date < existing.date:
+                                existing.date = h.date
+                            log.debug("Adjacent-date merge: '%s' (%s) <- '%s' (%s)",
+                                      existing.title[:40], existing.date,
+                                      h.title[:40], h.date)
+                            break
+                    if fuzzy_match:
+                        break
+
             if fuzzy_match:
                 fuzzy_match.sources.update(h.sources)
                 if len(h.title) > len(fuzzy_match.title):
