@@ -267,7 +267,7 @@
       "chamber": "house",
       "code": "hsii00",
       "cspan_id": 2133,
-      "tier": 3,
+      "tier": 2,
       "youtube": [
         "https://www.youtube.com/user/NaturalResourcesGOP",
         "https://www.youtube.com/@NaturalResourcesGOP"
@@ -284,7 +284,7 @@
       "chamber": "house",
       "code": "hsvr00",
       "cspan_id": 2128,
-      "tier": 3,
+      "tier": 2,
       "youtube": [
         "https://www.youtube.com/user/HouseVetsAffairs",
         "https://www.youtube.com/@HouseVeteransAffairs"
@@ -301,7 +301,7 @@
       "chamber": "house",
       "code": "hsru00",
       "cspan_id": 2119,
-      "tier": 3,
+      "tier": 2,
       "youtube": [
         "https://www.youtube.com/user/RulesReps",
         "https://www.youtube.com/@HouseRulesCommittee"
@@ -588,7 +588,7 @@
       "chamber": "senate",
       "code": "ssva00",
       "cspan_id": 61197,
-      "tier": 3,
+      "tier": 2,
       "youtube": null,
       "website": "https://veterans.senate.gov",
       "hearings_url": "https://www.veterans.senate.gov/hearings",

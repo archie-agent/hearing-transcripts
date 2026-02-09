@@ -93,7 +93,7 @@ def _load_committees() -> dict[str, dict]:
 COMMITTEES: dict[str, dict] = _load_committees()
 
 
-def get_committees(max_tier: int = 2) -> dict[str, dict]:
+def get_committees(max_tier: int = 99) -> dict[str, dict]:
     """Return committees filtered by tier. Tier 1 = core economics, 2 = adjacent, 3 = peripheral."""
     return {k: v for k, v in COMMITTEES.items() if v.get("tier", 3) <= max_tier}
 
