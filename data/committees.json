@@ -43,7 +43,8 @@
       "tier": 1,
       "youtube": [
         "https://www.youtube.com/channel/UCiGw0gRK-daU7Xv4oDMr9Hg",
-        "https://www.youtube.com/gopfinancialservices"
+        "https://www.youtube.com/gopfinancialservices",
+        "https://www.youtube.com/@GOPFinancialServices"
       ],
       "website": "https://financialservices.house.gov",
       "hearings_url": "https://financialservices.house.gov/calendar/",
@@ -124,7 +125,8 @@
       "cspan_id": 2111,
       "tier": 2,
       "youtube": [
-        "https://www.youtube.com/channel/UCtxAmeCl0xtSuo7tHZpgcQA"
+        "https://www.youtube.com/channel/UCtxAmeCl0xtSuo7tHZpgcQA",
+        "https://www.youtube.com/@HouseForeignGOP"
       ],
       "website": "https://foreignaffairs.house.gov",
       "hearings_url": "https://foreignaffairs.house.gov/committee-activity/hearings/all",
@@ -267,7 +269,8 @@
       "cspan_id": 2133,
       "tier": 3,
       "youtube": [
-        "https://www.youtube.com/user/NaturalResourcesGOP"
+        "https://www.youtube.com/user/NaturalResourcesGOP",
+        "https://www.youtube.com/@NaturalResourcesGOP"
       ],
       "website": "https://naturalresources.house.gov",
       "hearings_url": "https://naturalresources.house.gov/calendar/",

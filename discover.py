@@ -144,6 +144,20 @@ def _http_get(url: str, timeout: float = 20.0) -> httpx.Response | None:
 # Clips under this are kept separately but won't be promoted as standalone hearings.
 _MIN_HEARING_DURATION = 600  # 10 minutes
 
+# Title patterns for committee YouTube clips that should be routed to _youtube_clips
+# regardless of duration (member statements, media appearances, reactions, etc.)
+_COMMITTEE_YT_SKIP = (
+    "opening statement", "opening remarks",
+    "delivers opening statement",
+    "reaction to", "response to", "comments on",
+    "joins squawk", "joins fox", "joins cnn", "joins msnbc", "joins cnbc",
+    "appears on", "interview",
+    "press conference", "news conference",
+    "floor speech", "floor remarks", "floor consideration",
+    "talks ", "on the claman countdown",
+    "exposes the",
+)
+
 
 def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hearing]:
     """Find recent videos on a committee's YouTube channel(s).
@@ -237,6 +251,19 @@ def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hear
             "youtube_id": vid_id,
             "youtube_duration": duration,
         }
+
+        # Filter committee clips by title patterns (regardless of duration)
+        title_lower = title.lower()
+        if any(pat in title_lower for pat in _COMMITTEE_YT_SKIP):
+            _youtube_clips.append({
+                "committee_key": committee_key,
+                "date": date_formatted,
+                "title": title,
+                "duration": duration,
+                **yt_source,
+            })
+            log.debug("YouTube clip filtered by title: %s", title[:80])
+            continue
 
         if duration >= _MIN_HEARING_DURATION:
             # Long enough to be a real hearing

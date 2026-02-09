@@ -186,7 +186,7 @@ def scrape_new_senate_cms(html: str, base_url: str, cutoff: datetime) -> list[Sc
         # New Senate CMS wraps entire card in <a> — prefer title-specific element
         title_el = link.select_one(".LegislationList__title, .ArticleTitle")
         title = title_el.get_text(strip=True) if title_el else link.get_text(strip=True)
-        if not title or len(title) < 15:
+        if not title or len(title) < 5:
             continue
 
         abs_href = _abs_url(href, base_url)
