@@ -84,16 +84,24 @@ class Hearing:
 
 def _normalize_title(title: str) -> str:
     """Normalize a hearing title for comparison/dedup."""
-    # Strip leading "Hearings" (with or without colon/space) — covers
-    # smushed website titles like "Hearings02/4/2026Hit the Road..."
+    # Specific multi-word prefixes first (before generic "Hearing" strip)
+    title = re.sub(r"^HEARING NOTICE:?\s*", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^Hearing\s+Entitled:?\s*", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^Oversight\s+Hearing\s*[-:]\s*", "", title, flags=re.IGNORECASE)
+    # Smushed "Hearings" (no space) before generic "Hearing:" — covers
+    # "Hearings02/4/2026Hit the Road..." from old website scrapes
     title = re.sub(r"^Hearings?\s*:?\s*", "", title, flags=re.IGNORECASE)
     title = re.sub(
         r"^(Full Committee |Subcommittee )?Hearing:?\s*",
         "", title, flags=re.IGNORECASE,
     )
-    title = re.sub(r"^HEARING NOTICE:?\s*", "", title, flags=re.IGNORECASE)
+    # Subcommittee-prefixed titles (Energy & Commerce pattern)
+    # e.g. "Energy Hearing:", "O&I Hearing:", "C&T Hearing:"
+    title = re.sub(r"^[\w&]+\s+Hearing:?\s*", "", title, flags=re.IGNORECASE)
     # Strip smushed dates: "02/4/2026" or "2/04/26" at the start
     title = re.sub(r"^\d{1,2}/\d{1,2}/\d{2,4}\s*", "", title)
+    # Strip **DATE CHANGE** or similar bracketed announcements
+    title = re.sub(r"^\*+[A-Z\s]+\*+\s*", "", title)
     # Strip "Upcoming" prefix
     title = re.sub(r"^Upcoming\s*:?\s*", "", title, flags=re.IGNORECASE)
     # Strip congress.gov boilerplate prefixes
@@ -101,8 +109,9 @@ def _normalize_title(title: str) -> str:
         r"^(An? )?(Oversight )?Hearing[s]?\s+to\s+(examine|consider)\s+",
         "", title, flags=re.IGNORECASE,
     )
-    # Strip trailing metadata: "Location:...", "Time:..."
+    # Strip trailing metadata: "Location:...", "Time:...", "WASHINGTON, D.C. ..."
     title = re.sub(r"\s+(Location|Time):.*$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"WASHINGTON,?\s*D\.?C\.?\s*[-–—].*$", "", title, flags=re.IGNORECASE)
     words = re.sub(r"[^a-z0-9\s]", "", title.lower()).split()[:8]
     return " ".join(words)
 
