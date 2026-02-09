@@ -23,21 +23,13 @@ from state import State
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
-# Monkey-patch to skip slow C-SPAN sources
-import discover
-_orig_discover_cspan_ddg = getattr(discover, "discover_cspan_ddg", None)
-_orig_discover_cspan_by_committee = getattr(discover, "discover_cspan_by_committee", None)
-
-def _noop_ddg(*a, **kw):
-    return []
-def _noop_cspan(*a, **kw):
-    return []
-
-# Patch if they exist
-if _orig_discover_cspan_ddg:
-    discover.discover_cspan_ddg = _noop_ddg
-if _orig_discover_cspan_by_committee:
-    discover.discover_cspan_by_committee = _noop_cspan
+# Monkey-patch to skip slow C-SPAN WAF searches (DDG, by-committee, targeted, rotation)
+import cspan as _cspan_mod
+_cspan_noop = lambda *a, **kw: []
+_cspan_mod.discover_cspan_google = _cspan_noop
+_cspan_mod.discover_cspan_by_committee = _cspan_noop
+_cspan_mod.discover_cspan_targeted = _cspan_noop
+_cspan_mod.discover_cspan_rotation = _cspan_noop
 
 def main():
     days = int(sys.argv[1]) if len(sys.argv) > 1 else 14
@@ -72,7 +64,7 @@ def main():
 
         has_yt = bool(s.get("youtube_url"))
         has_web = bool(s.get("website_url"))
-        has_cong = bool(s.get("congress_url"))
+        has_cong = bool(s.get("congress_api_event_id"))
         has_cspan = bool(s.get("cspan_url"))
         has_isvp = bool(s.get("isvp_comm"))
         has_gov = bool(s.get("govinfo_package_id"))

@@ -169,6 +169,7 @@ _MARKUP_PATTERNS = (
     "business meeting",
     "organizational meeting",
     "member day",
+    "meeting announcement",
 )
 
 
