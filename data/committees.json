@@ -26,7 +26,9 @@
       "code": "hswm00",
       "cspan_id": 2129,
       "tier": 1,
-      "youtube": "https://www.youtube.com/user/WandMRepublicans",
+      "youtube": [
+        "https://www.youtube.com/user/WandMRepublicans"
+      ],
       "website": "https://waysandmeans.house.gov",
       "hearings_url": "https://waysandmeans.house.gov/hearings/",
       "scraper_type": "wordpress_single_event",
@@ -39,7 +41,10 @@
       "code": "hsba00",
       "cspan_id": 2106,
       "tier": 1,
-      "youtube": "https://www.youtube.com/gopfinancialservices",
+      "youtube": [
+        "https://www.youtube.com/channel/UCiGw0gRK-daU7Xv4oDMr9Hg",
+        "https://www.youtube.com/gopfinancialservices"
+      ],
       "website": "https://financialservices.house.gov",
       "hearings_url": "https://financialservices.house.gov/calendar/",
       "scraper_type": "aspnet_card",
@@ -53,7 +58,9 @@
       "code": "hsif00",
       "cspan_id": 2110,
       "tier": 1,
-      "youtube": "https://www.youtube.com/energyandcommerce",
+      "youtube": [
+        "https://www.youtube.com/energyandcommerce"
+      ],
       "website": "https://energycommerce.house.gov",
       "hearings_url": "https://energycommerce.house.gov/calendars",
       "scraper_type": "generic_links",
@@ -67,7 +74,9 @@
       "code": "hsbu00",
       "cspan_id": 2107,
       "tier": 1,
-      "youtube": "https://www.youtube.com/HouseBudgetGOP",
+      "youtube": [
+        "https://www.youtube.com/HouseBudgetGOP"
+      ],
       "website": "https://budget.house.gov",
       "hearings_url": "https://budget.house.gov/hearings/",
       "scraper_type": "html_table",
@@ -81,7 +90,10 @@
       "code": "hsap00",
       "cspan_id": 2104,
       "tier": 2,
-      "youtube": "https://www.youtube.com/user/houseappropsgop",
+      "youtube": [
+        "https://www.youtube.com/channel/UCMaSlF09S0fpoRshS2t_7XA",
+        "https://www.youtube.com/user/houseappropsgop"
+      ],
       "website": "https://appropriations.house.gov",
       "hearings_url": "https://appropriations.house.gov/schedule/hearings",
       "scraper_type": "evo_framework",
@@ -95,7 +107,9 @@
       "code": "hsag00",
       "cspan_id": 2103,
       "tier": 2,
-      "youtube": "https://www.youtube.com/user/AgRepublicans",
+      "youtube": [
+        "https://www.youtube.com/user/AgRepublicans"
+      ],
       "website": "https://agriculture.house.gov",
       "hearings_url": "https://agriculture.house.gov/calendar/?Timeframe=All",
       "scraper_type": "generic_links",
@@ -109,7 +123,9 @@
       "code": "hsfa00",
       "cspan_id": 2111,
       "tier": 2,
-      "youtube": "https://www.youtube.com/channel/UCtxAmeCl0xtSuo7tHZpgcQA",
+      "youtube": [
+        "https://www.youtube.com/channel/UCtxAmeCl0xtSuo7tHZpgcQA"
+      ],
       "website": "https://foreignaffairs.house.gov",
       "hearings_url": "https://foreignaffairs.house.gov/committee-activity/hearings/all",
       "scraper_type": "evo_framework",
@@ -122,7 +138,9 @@
       "code": "hssy00",
       "cspan_id": 2146,
       "tier": 2,
-      "youtube": "https://www.youtube.com/c/housesciencegop",
+      "youtube": [
+        "https://www.youtube.com/c/housesciencegop"
+      ],
       "website": "https://science.house.gov",
       "hearings_url": "https://science.house.gov/hearings/",
       "scraper_type": "html_table",
@@ -136,7 +154,9 @@
       "code": "hssm00",
       "cspan_id": 2126,
       "tier": 2,
-      "youtube": "https://youtube.com/SmallBizRepublicans",
+      "youtube": [
+        "https://youtube.com/SmallBizRepublicans"
+      ],
       "website": "https://smallbusiness.house.gov",
       "hearings_url": "https://smallbusiness.house.gov/calendar/",
       "scraper_type": "generic_links",
@@ -150,7 +170,9 @@
       "code": "hspw00",
       "cspan_id": 2118,
       "tier": 2,
-      "youtube": "https://www.youtube.com/Transport",
+      "youtube": [
+        "https://www.youtube.com/Transport"
+      ],
       "website": "https://transportation.house.gov",
       "hearings_url": "https://transportation.house.gov/calendar/",
       "scraper_type": "generic_links",
@@ -164,7 +186,9 @@
       "code": "hsgo00",
       "cspan_id": 2112,
       "tier": 2,
-      "youtube": "https://www.youtube.com/user/oversightandreform",
+      "youtube": [
+        "https://www.youtube.com/user/oversightandreform"
+      ],
       "website": "https://oversight.house.gov",
       "hearings_url": "https://oversight.house.gov/hearing/",
       "scraper_type": "wordpress_featured_post",
@@ -178,7 +202,9 @@
       "code": "hsju00",
       "cspan_id": 2115,
       "tier": 2,
-      "youtube": "https://www.youtube.com/@USHouseJudiciaryGOP",
+      "youtube": [
+        "https://www.youtube.com/@USHouseJudiciaryGOP"
+      ],
       "website": "https://judiciary.house.gov",
       "hearings_url": "https://judiciary.house.gov/committee-activity/hearings",
       "scraper_type": "evo_framework",
@@ -192,7 +218,9 @@
       "code": "hsas00",
       "cspan_id": 2105,
       "tier": 2,
-      "youtube": "https://www.youtube.com/@HouseArmedServices",
+      "youtube": [
+        "https://www.youtube.com/@HouseArmedServices"
+      ],
       "website": "https://armedservices.house.gov",
       "hearings_url": "https://armedservices.house.gov/calendar/",
       "scraper_type": "aspnet_card",
@@ -206,7 +234,9 @@
       "code": "hsed00",
       "cspan_id": 2109,
       "tier": 2,
-      "youtube": "https://www.youtube.com/channel/UC8Ewe7WqGg01KRNjJCO5cjg",
+      "youtube": [
+        "https://www.youtube.com/channel/UC8Ewe7WqGg01KRNjJCO5cjg"
+      ],
       "website": "https://edworkforce.house.gov",
       "hearings_url": "https://edworkforce.house.gov/calendar/list.aspx?EventTypeID=189",
       "scraper_type": "html_table",
@@ -220,7 +250,9 @@
       "code": "hshm00",
       "cspan_id": 2300,
       "tier": 2,
-      "youtube": "https://www.youtube.com/@HouseHomeland",
+      "youtube": [
+        "https://www.youtube.com/@HouseHomeland"
+      ],
       "website": "https://homeland.house.gov",
       "hearings_url": "https://homeland.house.gov/hearings/",
       "scraper_type": "tribe_events",
@@ -234,7 +266,9 @@
       "code": "hsii00",
       "cspan_id": 2133,
       "tier": 3,
-      "youtube": "https://www.youtube.com/user/NaturalResourcesGOP",
+      "youtube": [
+        "https://www.youtube.com/user/NaturalResourcesGOP"
+      ],
       "website": "https://naturalresources.house.gov",
       "hearings_url": "https://naturalresources.house.gov/calendar/",
       "scraper_type": "generic_links",
@@ -248,7 +282,9 @@
       "code": "hsvr00",
       "cspan_id": 2128,
       "tier": 3,
-      "youtube": "https://www.youtube.com/user/HouseVetsAffairs",
+      "youtube": [
+        "https://www.youtube.com/user/HouseVetsAffairs"
+      ],
       "website": "https://veterans.house.gov",
       "hearings_url": "https://veterans.house.gov/calendar/",
       "scraper_type": "wordpress_calblocker",
@@ -262,7 +298,9 @@
       "code": "hsru00",
       "cspan_id": 2119,
       "tier": 3,
-      "youtube": "https://www.youtube.com/user/RulesReps",
+      "youtube": [
+        "https://www.youtube.com/user/RulesReps"
+      ],
       "website": "https://rules.house.gov",
       "hearings_url": "https://rules.house.gov/media/announcements",
       "scraper_type": "evo_framework",
@@ -284,14 +322,15 @@
       "requires_js": false,
       "notes": "No listing page found; /hearing/ redirects to single event"
     },
-
     "senate.finance": {
       "name": "Senate Finance",
       "chamber": "senate",
       "code": "ssfi00",
       "cspan_id": 61185,
       "tier": 1,
-      "youtube": "https://www.youtube.com/user/SenFinanceMajority",
+      "youtube": [
+        "https://www.youtube.com/user/SenFinanceMajority"
+      ],
       "website": "https://finance.senate.gov",
       "hearings_url": "https://www.finance.senate.gov/hearings",
       "scraper_type": "new_senate_cms",
@@ -308,7 +347,9 @@
       "code": "ssbk00",
       "cspan_id": 60979,
       "tier": 1,
-      "youtube": "https://www.youtube.com/@SenBankingGOP",
+      "youtube": [
+        "https://www.youtube.com/@SenBankingGOP"
+      ],
       "website": "https://banking.senate.gov",
       "hearings_url": "https://www.banking.senate.gov/hearings",
       "scraper_type": "drupal_table",
@@ -342,7 +383,9 @@
       "code": "sscm00",
       "cspan_id": 60994,
       "tier": 1,
-      "youtube": "https://www.youtube.com/@CommerceRepublicans",
+      "youtube": [
+        "https://www.youtube.com/@CommerceRepublicans"
+      ],
       "website": "https://commerce.senate.gov",
       "hearings_url": "https://www.commerce.senate.gov/hearings",
       "scraper_type": "drupal_links",
@@ -392,7 +435,9 @@
       "code": "sshr00",
       "cspan_id": 61053,
       "tier": 2,
-      "youtube": null,
+      "youtube": [
+        "https://www.youtube.com/channel/UC4aUVj3ym3-52EoGBCzbO5g"
+      ],
       "website": "https://help.senate.gov",
       "hearings_url": "https://www.help.senate.gov/hearings",
       "scraper_type": "new_senate_cms",
@@ -514,7 +559,9 @@
       "code": "ssen00",
       "cspan_id": 61183,
       "tier": 2,
-      "youtube": null,
+      "youtube": [
+        "https://www.youtube.com/@ENRGOP"
+      ],
       "website": "https://energy.senate.gov",
       "hearings_url": "https://www.energy.senate.gov/hearings",
       "scraper_type": "drupal_links",

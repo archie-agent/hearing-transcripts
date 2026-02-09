@@ -132,24 +132,40 @@ _MIN_HEARING_DURATION = 600  # 10 minutes
 
 
 def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hearing]:
-    """Find recent videos on a committee's YouTube channel.
+    """Find recent videos on a committee's YouTube channel(s).
+
+    Supports multiple channels per committee — ``meta["youtube"]`` can be
+    a single URL string or a list of URL strings.
 
     Returns two categories:
     - Full hearings (>= 10 min): created as standalone Hearing objects
     - Short clips (< 10 min): stored in _youtube_clips for later matching
     """
-    youtube_url = meta.get("youtube")
-    if not youtube_url:
+    yt_raw = meta.get("youtube")
+    if not yt_raw:
+        return []
+
+    # Normalize to list of channel URLs
+    if isinstance(yt_raw, str):
+        channels = [yt_raw]
+    elif isinstance(yt_raw, list):
+        channels = [u for u in yt_raw if u]
+    else:
+        return []
+
+    if not channels:
         return []
 
     cutoff = datetime.now() - timedelta(days=days)
     cutoff_str = cutoff.strftime("%Y%m%d")
 
-    # Scan both /videos and /streams — some channels (like C-SPAN) post
-    # hearings as live streams that don't appear in the /videos tab.
-    tabs = [f"{youtube_url}/videos"]
-    if meta.get("scan_streams", False):
-        tabs.append(f"{youtube_url}/streams")
+    # Build list of tabs to scan across all channels.
+    # Always scan /streams too — many committees post full hearings as
+    # live streams that don't appear in the /videos tab.
+    tabs = []
+    for ch_url in channels:
+        tabs.append(f"{ch_url}/videos")
+        tabs.append(f"{ch_url}/streams")
 
     all_stdout = ""
     for tab_url in tabs:
