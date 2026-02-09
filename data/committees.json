@@ -366,7 +366,9 @@
       "code": "ssbu00",
       "cspan_id": 62867,
       "tier": 1,
-      "youtube": null,
+      "youtube": [
+        "https://www.youtube.com/@BudgetGOP"
+      ],
       "website": "https://budget.senate.gov",
       "hearings_url": "https://www.budget.senate.gov/hearings",
       "scraper_type": "drupal_table",
@@ -402,7 +404,9 @@
       "code": "ssap00",
       "cspan_id": 60976,
       "tier": 2,
-      "youtube": null,
+      "youtube": [
+        "https://www.youtube.com/@SenateApprops"
+      ],
       "website": "https://appropriations.senate.gov",
       "hearings_url": "https://www.appropriations.senate.gov/hearings",
       "scraper_type": "drupal_table",
@@ -490,7 +494,10 @@
       "code": "ssev00",
       "cspan_id": 61184,
       "tier": 2,
-      "youtube": null,
+      "youtube": [
+        "https://www.youtube.com/@EPWGOP",
+        "https://www.youtube.com/@EPWCmte"
+      ],
       "website": "https://epw.senate.gov",
       "hearings_url": "https://www.epw.senate.gov/public/index.cfm/hearings",
       "scraper_type": "coldfusion_table",
@@ -593,7 +600,9 @@
       "code": "sssb00",
       "cspan_id": 61132,
       "tier": 2,
-      "youtube": null,
+      "youtube": [
+        "https://www.youtube.com/@SenateSmallBiz"
+      ],
       "website": "https://sbc.senate.gov",
       "hearings_url": "https://www.sbc.senate.gov/public/index.cfm/hearings",
       "scraper_type": "coldfusion_table",
