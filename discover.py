@@ -84,11 +84,25 @@ class Hearing:
 
 def _normalize_title(title: str) -> str:
     """Normalize a hearing title for comparison/dedup."""
+    # Strip leading "Hearings" (with or without colon/space) — covers
+    # smushed website titles like "Hearings02/4/2026Hit the Road..."
+    title = re.sub(r"^Hearings?\s*:?\s*", "", title, flags=re.IGNORECASE)
     title = re.sub(
         r"^(Full Committee |Subcommittee )?Hearing:?\s*",
         "", title, flags=re.IGNORECASE,
     )
     title = re.sub(r"^HEARING NOTICE:?\s*", "", title, flags=re.IGNORECASE)
+    # Strip smushed dates: "02/4/2026" or "2/04/26" at the start
+    title = re.sub(r"^\d{1,2}/\d{1,2}/\d{2,4}\s*", "", title)
+    # Strip "Upcoming" prefix
+    title = re.sub(r"^Upcoming\s*:?\s*", "", title, flags=re.IGNORECASE)
+    # Strip congress.gov boilerplate prefixes
+    title = re.sub(
+        r"^(An? )?(Oversight )?Hearing[s]?\s+to\s+(examine|consider)\s+",
+        "", title, flags=re.IGNORECASE,
+    )
+    # Strip trailing metadata: "Location:...", "Time:..."
+    title = re.sub(r"\s+(Location|Time):.*$", "", title, flags=re.IGNORECASE)
     words = re.sub(r"[^a-z0-9\s]", "", title.lower()).split()[:8]
     return " ".join(words)
 
@@ -893,6 +907,50 @@ def _discover_committee(key: str, meta: dict, days: int) -> list[Hearing]:
 
 
 # ---------------------------------------------------------------------------
+# Deterministic ISVP parameter construction for Senate hearings
+# ---------------------------------------------------------------------------
+
+def _attach_isvp_params(hearings: list[Hearing], committees: dict) -> None:
+    """Construct ISVP params from committee config + hearing date.
+
+    Senate hearing detail pages embed ISVP iframes with comm/filename params,
+    but the iframes are JS-rendered and the detail scraper uses httpx (no JS).
+    Instead of relying on iframe extraction, construct the params deterministically
+    from the committee's video_comm field and the hearing date.
+
+    The ISVP filename format is: {video_comm}{MMDDYY}
+    fetch_isvp_captions() returns None gracefully if the stream doesn't exist,
+    so probing is always safe.
+    """
+    attached = 0
+    for h in hearings:
+        # Skip if already has ISVP params (e.g., from iframe extraction)
+        if h.sources.get("isvp_comm"):
+            continue
+
+        meta = committees.get(h.committee_key, {})
+        video_comm = meta.get("video_comm")
+        if not video_comm:
+            continue
+        if meta.get("chamber") != "senate":
+            continue
+
+        # Parse hearing date (YYYY-MM-DD) to construct ISVP filename (MMDDYY)
+        try:
+            dt = datetime.strptime(h.date, "%Y-%m-%d")
+        except ValueError:
+            continue
+
+        isvp_filename = f"{video_comm}{dt.strftime('%m%d%y')}"
+        h.sources["isvp_comm"] = video_comm
+        h.sources["isvp_filename"] = isvp_filename
+        attached += 1
+
+    if attached:
+        log.info("ISVP params: attached to %d Senate hearings", attached)
+
+
+# ---------------------------------------------------------------------------
 # Main discovery
 # ---------------------------------------------------------------------------
 
@@ -954,7 +1012,8 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
     except Exception as e:
         log.warning("C-SPAN YouTube discovery failed: %s", e)
 
-    # C-SPAN discovery: 3-step strategy (DDG → targeted → rotation)
+    # C-SPAN discovery: 4-step strategy
+    #   DDG → sponsor ID by committee → targeted title → weekly rotation
     # Only search for past hearings — future ones can't have video yet.
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -967,7 +1026,8 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
         if unmatched:
             google_results = cspan.discover_cspan_google(
                 [{"id": h.id, "title": h.title, "date": h.date,
-                  "committee_key": h.committee_key}
+                  "committee_key": h.committee_key,
+                  "committee_name": h.committee_name}
                  for h in unmatched]
             )
             for r in google_results:
@@ -976,7 +1036,22 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
                         h.sources["cspan_url"] = r["cspan_url"]
                         break
 
-        # Step 2: Title-based C-SPAN search for remaining (WAF-limited)
+        # Step 2: Sponsor ID search for committees with unmatched hearings (WAF-limited)
+        still_unmatched = [h for h in deduped
+                          if "cspan_url" not in h.sources and h.date <= today]
+        if still_unmatched:
+            # Identify unique committees that still need searching
+            unmatched_keys = list(dict.fromkeys(
+                h.committee_key for h in still_unmatched
+            ))
+            if unmatched_keys:
+                sponsor_results = cspan.discover_cspan_by_committee(
+                    unmatched_keys, committees, state=state, max_searches=6,
+                )
+                if sponsor_results:
+                    _attach_cspan_urls(deduped, sponsor_results)
+
+        # Step 3: Title-based C-SPAN search (WAF-limited, fallback)
         still_unmatched = [h for h in deduped
                           if "cspan_url" not in h.sources and h.date <= today]
         if still_unmatched:
@@ -986,11 +1061,12 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
                   "committee_name": h.committee_name}
                  for h in still_unmatched],
                 state=state,
+                max_searches=4,
             )
             if targeted_results:
                 _attach_cspan_urls(deduped, targeted_results)
 
-        # Step 3: Weekly committee rotation (background, low priority)
+        # Step 4: Weekly committee rotation (background, low priority)
         if state and _should_rotate(state):
             rotation_results = cspan.discover_cspan_rotation(
                 committees, days=max(days, 7), state=state,
@@ -1002,6 +1078,10 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
         log.debug("cspan module not available, skipping C-SPAN discovery")
     except Exception as e:
         log.warning("C-SPAN discovery failed: %s", e)
+
+    # Deterministic ISVP params for Senate hearings (before detail scraping,
+    # so iframe-extracted params from the detail scraper can override)
+    _attach_isvp_params(deduped, committees)
 
     # After dedup, enrich with testimony PDFs
     for hearing in deduped:
@@ -1031,7 +1111,13 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
 # ---------------------------------------------------------------------------
 
 def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
-    """Merge hearings that appear to be the same event from different sources."""
+    """Merge hearings that appear to be the same event from different sources.
+
+    Two-pass dedup:
+    1. Exact match on (committee_key, date, normalized_title).
+    2. Fuzzy match within (committee_key, date) groups — same committee + same
+       date is a strong prior, so a lower similarity bar (0.30) suffices.
+    """
     merged: dict[str, Hearing] = {}
 
     for h in hearings:
@@ -1045,7 +1131,22 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
             if len(h.title) > len(existing.title):
                 existing.title = h.title
         else:
-            merged[dedup_key] = h
+            # Fuzzy fallback: check if any existing hearing for the same
+            # committee+date is similar enough to merge
+            group_prefix = f"{h.committee_key}:{h.date}:"
+            fuzzy_match = None
+            for key, existing in merged.items():
+                if not key.startswith(group_prefix):
+                    continue
+                if _title_similarity(h.title, existing.title) >= 0.30:
+                    fuzzy_match = existing
+                    break
+            if fuzzy_match:
+                fuzzy_match.sources.update(h.sources)
+                if len(h.title) > len(fuzzy_match.title):
+                    fuzzy_match.title = h.title
+            else:
+                merged[dedup_key] = h
 
     return list(merged.values())
 

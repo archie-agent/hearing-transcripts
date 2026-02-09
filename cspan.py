@@ -352,6 +352,127 @@ def discover_cspan_rotation(
     return all_results
 
 
+def discover_cspan_by_committee(
+    committee_keys: list[str],
+    committees: dict,
+    state=None,
+    max_searches: int = 6,
+) -> list[dict]:
+    """Search C-SPAN by sponsor ID for specific unmatched committees.
+
+    Like discover_cspan_rotation() but targeted to specific committees rather
+    than the full rotation queue. Uses the same WAF budget/batch cooldown.
+
+    Args:
+        committee_keys: Committee keys that still have unmatched hearings.
+        committees: Full committee dict from config.
+        state: State instance for search tracking.
+        max_searches: WAF budget cap.
+
+    Returns:
+        [{title, date, url, program_id, committee_key}, ...]
+    """
+    # Deduplicate keys and filter to those with cspan_id
+    seen_keys: set[str] = set()
+    to_search: list[tuple[str, dict]] = []
+    for key in committee_keys:
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        meta = committees.get(key, {})
+        if meta.get("cspan_id"):
+            to_search.append((key, meta))
+
+    if not to_search:
+        return []
+
+    if len(to_search) > max_searches:
+        log.info("C-SPAN by-committee: capping from %d to %d (WAF budget)",
+                 len(to_search), max_searches)
+        to_search = to_search[:max_searches]
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        log.warning("playwright not installed, skipping C-SPAN by-committee search")
+        return []
+
+    cutoff = datetime.now() - timedelta(days=30)
+    all_results: list[dict] = []
+    seen_ids: set[str] = set()
+    searches_done = 0
+    waf_blocked = False
+
+    with sync_playwright() as p:
+        browser, context, page = _launch_cspan_browser(p)
+
+        for key, meta in to_search:
+            if waf_blocked:
+                break
+
+            # Batch cooldown
+            if searches_done > 0 and searches_done % BATCH_SIZE == 0:
+                log.info("C-SPAN by-committee: cooldown (%ds) after %d searches",
+                         BATCH_COOLDOWN, searches_done)
+                _time.sleep(BATCH_COOLDOWN)
+
+            cspan_id = meta["cspan_id"]
+            search_url = (
+                f"https://www.c-span.org/search/?query=&searchtype=Videos"
+                f"&sponsorid%5B%5D={cspan_id}&sort=Most+Recent+Event"
+            )
+            _rate_limit()
+
+            try:
+                page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(7000)
+                searches_done += 1
+
+                body_text = (page.inner_text("body") or "")[:300]
+                if "confirm you are human" in body_text.lower():
+                    log.info("C-SPAN by-committee: WAF captcha at search %d (%s), "
+                             "cooldown 60s...", searches_done, key)
+                    context.close()
+                    browser.close()
+                    _time.sleep(60)
+                    browser, context, page = _launch_cspan_browser(p)
+                    _rate_limit()
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(7000)
+                    body_text = (page.inner_text("body") or "")[:300]
+                    if "confirm you are human" in body_text.lower():
+                        log.warning("C-SPAN by-committee: WAF still blocked, aborting")
+                        waf_blocked = True
+                        break
+
+                hearings = _parse_search_results(page, cutoff)
+
+                new = 0
+                for h in hearings:
+                    if h["program_id"] not in seen_ids:
+                        seen_ids.add(h["program_id"])
+                        h["committee_key"] = key
+                        all_results.append(h)
+                        new += 1
+
+                if state:
+                    state.record_cspan_search(key, new)
+
+                if new:
+                    log.info("  C-SPAN by-committee %s: %d hearings", key, new)
+                else:
+                    log.debug("  C-SPAN by-committee %s: no recent hearings", key)
+
+            except Exception as e:
+                log.warning("C-SPAN by-committee search failed for %s: %s", key, e)
+
+        browser.close()
+
+    log.info("C-SPAN by-committee: %d hearings from %d searches",
+             len(all_results), searches_done)
+    return all_results
+
+
 def _parse_search_results(page, cutoff: datetime) -> list[dict]:
     """Parse program listings from a C-SPAN search results page.
 
@@ -460,15 +581,15 @@ def _extract_search_keywords(title: str, max_words: int = 5) -> str:
 
 def discover_cspan_google(
     hearings: list[dict],
-    max_searches: int = 20,
+    max_searches: int = 200,
 ) -> list[dict]:
     """Find C-SPAN URLs via DuckDuckGo HTML search. No WAF cost.
 
     Uses DDG's HTML endpoint which returns real results without JS.
-    Query format: ``c-span.org/program {keywords} {year}``
+    Query format: ``c-span.org {committee_name} {keywords} {year}``
 
     Args:
-        hearings: [{id, title, date, committee_key}, ...]
+        hearings: [{id, title, date, committee_key, committee_name}, ...]
         max_searches: cap on DDG queries per run
 
     Returns:
@@ -486,8 +607,17 @@ def discover_cspan_google(
             break
 
         keywords = _extract_search_keywords(h["title"])
+        committee_name = h.get("committee_name", "")
+
         if not keywords:
-            continue
+            if committee_name:
+                log.debug("DDG C-SPAN: empty keywords for '%s', "
+                          "falling back to committee name", h["title"][:50])
+                keywords = committee_name
+            else:
+                log.debug("DDG C-SPAN: skipping '%s' (no keywords or "
+                          "committee name)", h["title"][:50])
+                continue
 
         # Add year context for relevance
         date_str = h.get("date", "")
@@ -498,7 +628,11 @@ def discover_cspan_google(
             except ValueError:
                 pass
 
-        query = f"c-span.org/program {keywords}"
+        # Use committee name instead of generic "c-span.org/program"
+        if committee_name:
+            query = f"c-span.org {committee_name} {keywords}"
+        else:
+            query = f"c-span.org/program {keywords}"
         if year:
             query += f" {year}"
 
