@@ -8,7 +8,12 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 log = logging.getLogger(__name__)
+
+# Load .env from the project root (won't override existing env vars)
+load_dotenv(Path(__file__).parent / ".env")
 
 # ---------------------------------------------------------------------------
 # Paths

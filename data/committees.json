@@ -286,7 +286,8 @@
       "cspan_id": 2128,
       "tier": 3,
       "youtube": [
-        "https://www.youtube.com/user/HouseVetsAffairs"
+        "https://www.youtube.com/user/HouseVetsAffairs",
+        "https://www.youtube.com/@HouseVeteransAffairs"
       ],
       "website": "https://veterans.house.gov",
       "hearings_url": "https://veterans.house.gov/calendar/",
@@ -302,7 +303,8 @@
       "cspan_id": 2119,
       "tier": 3,
       "youtube": [
-        "https://www.youtube.com/user/RulesReps"
+        "https://www.youtube.com/user/RulesReps",
+        "https://www.youtube.com/@HouseRulesCommittee"
       ],
       "website": "https://rules.house.gov",
       "hearings_url": "https://rules.house.gov/media/announcements",

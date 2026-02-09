@@ -156,6 +156,28 @@ def _http_get(url: str, timeout: float = 20.0) -> httpx.Response | None:
 # YouTube discovery via yt-dlp
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Non-hearing filters (markups, procedural, business meetings)
+# ---------------------------------------------------------------------------
+
+_MARKUP_PATTERNS = (
+    "markup of",
+    "full committee markup",
+    "subcommittee markup",
+    "mark up of",
+    "to consider the following",
+    "business meeting",
+    "organizational meeting",
+    "member day",
+)
+
+
+def _is_markup_or_procedural(title: str) -> bool:
+    """Return True if the title looks like a markup or procedural session, not a hearing."""
+    t = title.lower().strip()
+    return any(pat in t for pat in _MARKUP_PATTERNS)
+
+
 # Minimum video duration (seconds) to consider a YouTube video a real hearing.
 # Clips under this are kept separately but won't be promoted as standalone hearings.
 _MIN_HEARING_DURATION = 600  # 10 minutes
@@ -876,9 +898,9 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
 
     # GovInfo collections API returns packages *modified* since cutoff, not
     # *published* since cutoff.  Filter by dateIssued to drop old transcripts
-    # that merely got a metadata update.  GPO transcripts are published 3-6
-    # months after the hearing, so a 180-day window is generous.
-    date_floor = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+    # that merely got a metadata update.  Tie to the lookback window (min 30
+    # days) so stale transcripts don't pollute coverage stats.
+    date_floor = (datetime.now() - timedelta(days=max(days, 30))).strftime("%Y-%m-%d")
 
     hearings = []
     for pkg in data.get("packages", []):
@@ -1045,6 +1067,13 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
             all_hearings.extend(congress_api)
     except Exception as e:
         log.warning("congress.gov API discovery failed: %s", e)
+
+    # Filter markups and procedural sessions (not real hearings)
+    before_filter = len(all_hearings)
+    all_hearings = [h for h in all_hearings if not _is_markup_or_procedural(h.title)]
+    n_filtered = before_filter - len(all_hearings)
+    if n_filtered:
+        log.info("Filtered %d markups/procedural entries", n_filtered)
 
     # Deduplicate (same committee key)
     deduped = _deduplicate(all_hearings)
