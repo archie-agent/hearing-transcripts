@@ -1075,11 +1075,21 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
     if n_filtered:
         log.info("Filtered %d markups/procedural entries", n_filtered)
 
+    # Sort so YouTube entries come last in dedup.  Website and congress.gov
+    # entries establish canonical hearing dates; YouTube entries (whose upload
+    # dates may be +1 day) merge into them via adjacent-date matching.
+    all_hearings.sort(key=lambda h: (1 if "youtube_id" in h.sources else 0))
+
     # Deduplicate (same committee key)
     deduped = _deduplicate(all_hearings)
     # Cross-committee dedup (different keys, same hearing)
     deduped = _cross_committee_dedup(deduped)
     log.info("Total hearings: %d (deduped from %d)", len(deduped), len(all_hearings))
+
+    # Second pass: merge any remaining same-committee adjacent-date pairs.
+    # Catches YouTube entries that survived dedup as standalone items because
+    # the first pass didn't find a match (e.g., ordering edge cases).
+    deduped = _merge_adjacent_date_pairs(deduped)
 
     # Attach YouTube clips to matching website hearings
     _attach_youtube_clips(deduped)
@@ -1267,6 +1277,55 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
                 merged[dedup_key] = h
 
     return list(merged.values())
+
+
+def _merge_adjacent_date_pairs(hearings: list[Hearing]) -> list[Hearing]:
+    """Post-dedup pass: merge same-committee hearings at ±1 day.
+
+    After the main dedup, some YouTube entries may remain as standalone items
+    next to a congress.gov/website entry for the same hearing on an adjacent
+    date.  This pass merges those pairs, preferring the earlier date and
+    combining all sources.
+    """
+    # Index by (committee_key, date)
+    by_key_date: dict[tuple[str, str], list[int]] = {}
+    for i, h in enumerate(hearings):
+        by_key_date.setdefault((h.committee_key, h.date), []).append(i)
+
+    absorbed: set[int] = set()
+
+    for i, h in enumerate(hearings):
+        if i in absorbed:
+            continue
+
+        for offset in (-1, 1):
+            adj = _adjacent_date(h.date, offset)
+            neighbors = by_key_date.get((h.committee_key, adj), [])
+            for j in neighbors:
+                if j == i or j in absorbed:
+                    continue
+                other = hearings[j]
+                # Require YouTube on at least one side
+                if not (_has_youtube_source(h) or _has_youtube_source(other)):
+                    continue
+                if _title_similarity(h.title, other.title) >= 0.45:
+                    # Merge: keep the one with more sources, prefer earlier date
+                    winner, loser = (h, other) if len(h.sources) >= len(other.sources) else (other, h)
+                    winner.sources.update(loser.sources)
+                    if loser.date < winner.date:
+                        winner.date = loser.date
+                    if len(loser.title) > len(winner.title):
+                        winner.title = loser.title
+                    absorbed.add(j if winner is h else i)
+                    log.debug("Post-dedup merge: '%s' (%s) <- '%s' (%s)",
+                              winner.title[:40], winner.date,
+                              loser.title[:40], loser.date)
+                    break
+
+    result = [h for i, h in enumerate(hearings) if i not in absorbed]
+    if absorbed:
+        log.info("Post-dedup adjacent-date merge: %d pairs merged", len(absorbed))
+    return result
 
 
 # ---------------------------------------------------------------------------
