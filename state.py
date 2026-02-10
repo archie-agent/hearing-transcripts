@@ -95,6 +95,16 @@ class State:
                 )
             """)
 
+            # Migration: add congress_event_id for cross-run identity matching
+            try:
+                conn.execute("ALTER TABLE hearings ADD COLUMN congress_event_id TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hearings_congress_event_id
+                ON hearings(congress_event_id) WHERE congress_event_id IS NOT NULL
+            """)
+
             conn.commit()
         finally:
             conn.close()
@@ -145,6 +155,7 @@ class State:
         try:
             sources_json = json.dumps(sources)
             now = datetime.now(timezone.utc).isoformat()
+            congress_event_id = sources.get("congress_api_event_id")
 
             # Check if hearing already exists
             cursor = conn.execute("SELECT id FROM hearings WHERE id = ?", (hearing_id,))
@@ -153,16 +164,50 @@ class State:
             if exists:
                 conn.execute("""
                     UPDATE hearings
-                    SET committee_key = ?, date = ?, title = ?, slug = ?, sources_json = ?
+                    SET committee_key = ?, date = ?, title = ?, slug = ?,
+                        sources_json = ?, congress_event_id = COALESCE(?, congress_event_id)
                     WHERE id = ?
-                """, (committee_key, date, title, slug, sources_json, hearing_id))
+                """, (committee_key, date, title, slug, sources_json,
+                      congress_event_id, hearing_id))
             else:
                 conn.execute("""
-                    INSERT INTO hearings (id, committee_key, date, title, slug, sources_json, discovered_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (hearing_id, committee_key, date, title, slug, sources_json, now))
+                    INSERT INTO hearings (id, committee_key, date, title, slug,
+                                         sources_json, discovered_at, congress_event_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (hearing_id, committee_key, date, title, slug, sources_json,
+                      now, congress_event_id))
 
             conn.commit()
+        finally:
+            conn.close()
+
+    def find_by_congress_event_id(self, event_id: str) -> dict | None:
+        """Look up existing hearing by congress.gov event ID."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                "SELECT id, committee_key, date, title, processed_at "
+                "FROM hearings WHERE congress_event_id = ?", (event_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def find_by_committee_date(self, committee_key: str, date: str) -> list[dict]:
+        """Find all hearings for a committee on a given date (for fuzzy reconciliation)."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                "SELECT id, committee_key, date, title, processed_at, sources_json "
+                "FROM hearings WHERE committee_key = ? AND date = ?",
+                (committee_key, date))
+            rows = []
+            for row in cursor.fetchall():
+                d = dict(row)
+                if d.get("sources_json"):
+                    d["sources"] = json.loads(d["sources_json"])
+                rows.append(d)
+            return rows
         finally:
             conn.close()
 

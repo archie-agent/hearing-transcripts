@@ -9,6 +9,7 @@ from discover import (
     Hearing,
     _cross_committee_dedup,
     _deduplicate,
+    _merge_adjacent_date_pairs,
     _normalize_title,
     _title_similarity,
 )
@@ -227,24 +228,27 @@ class TestCrossCommitteeDedup:
         assert "website_url" in result[0].sources
         assert "govinfo_package_id" in result[0].sources
 
-    def test_cross_dedup_keeps_longer_title(self):
-        """When merging, the longer of the two titles should be kept."""
-        short = Hearing(
+    def test_cross_dedup_keeps_higher_authority_title(self):
+        """When merging, higher authority source title should win."""
+        yt = Hearing(
             "house.ways_and_means", "House Ways and Means",
-            "Federal Reserve Monetary Policy Report",
+            "Full Committee Hearing: Federal Reserve Monetary Policy Report to Congress",
             "2026-02-05",
             sources={"youtube_url": "yt"},
+            source_authority=1,
         )
-        long_title = Hearing(
+        gov = Hearing(
             "govinfo.house", "House (via GovInfo)",
-            "FEDERAL RESERVE MONETARY POLICY REPORT TO THE CONGRESS -- PART II",
+            "Federal Reserve Monetary Policy Report",
             "2026-02-05",
             sources={"govinfo_package_id": "pkg1"},
+            source_authority=3,
         )
-        result = _cross_committee_dedup([short, long_title])
+        result = _cross_committee_dedup([yt, gov])
         assert len(result) == 1
-        # The longer title should win
-        assert "PART II" in result[0].title
+        # GovInfo (authority=3) title wins over YouTube (authority=1) even though shorter
+        assert result[0].title == "Federal Reserve Monetary Policy Report"
+        assert result[0].source_authority == 3
 
     def test_cross_dedup_single_hearing_passthrough(self):
         """A single hearing on a date should pass through unchanged."""
@@ -272,3 +276,92 @@ class TestCrossCommitteeDedup:
         )
         result = _cross_committee_dedup([h1, h2])
         assert len(result) == 2
+
+
+class TestSourceAuthority:
+    """Tests for authority-aware title merging."""
+
+    def test_congress_api_title_wins_in_dedup(self):
+        """Congress.gov (authority=4) title should override YouTube (authority=1).
+        Titles must normalize to the same 8-word prefix for exact-match dedup."""
+        congress = Hearing(
+            "house.judiciary", "Judiciary",
+            "Oversight of Artificial Intelligence and Technology Policy",
+            "2026-02-10",
+            sources={"congress_api_event_id": "evt123"},
+            source_authority=4,
+        )
+        youtube = Hearing(
+            "house.judiciary", "Judiciary",
+            "Hearing: Oversight of Artificial Intelligence and Technology Policy in America and Beyond",
+            "2026-02-10",
+            sources={"youtube_url": "yt"},
+            source_authority=1,
+        )
+        result = _deduplicate([congress, youtube])
+        assert len(result) == 1
+        assert result[0].title == "Oversight of Artificial Intelligence and Technology Policy"
+        assert result[0].source_authority == 4
+
+    def test_equal_authority_falls_back_to_longer_title(self):
+        """When both sources have the same authority, longer title should win.
+        Titles normalize to the same 8-word prefix for exact-match dedup."""
+        h1 = Hearing(
+            "house.judiciary", "Judiciary",
+            "Hearing: Oversight of Artificial Intelligence Regulation and Its Impact",
+            "2026-02-10",
+            sources={"website_url": "web1"},
+            source_authority=2,
+        )
+        h2 = Hearing(
+            "house.judiciary", "Judiciary",
+            "Hearing: Oversight of Artificial Intelligence Regulation and Its Impact on Innovation in America",
+            "2026-02-10",
+            sources={"website_url": "web2"},
+            source_authority=2,
+        )
+        result = _deduplicate([h1, h2])
+        assert len(result) == 1
+        assert "Innovation" in result[0].title
+
+    def test_sort_order_congress_first(self):
+        """Higher authority entries should sort first (descending)."""
+        hearings = [
+            Hearing("house.judiciary", "Judiciary", "Title", "2026-02-10",
+                    source_authority=1),
+            Hearing("house.judiciary", "Judiciary", "Title", "2026-02-10",
+                    source_authority=4),
+            Hearing("house.judiciary", "Judiciary", "Title", "2026-02-10",
+                    source_authority=2),
+        ]
+        hearings.sort(key=lambda h: -h.source_authority)
+        assert hearings[0].source_authority == 4
+        assert hearings[1].source_authority == 2
+        assert hearings[2].source_authority == 1
+
+    def test_adjacent_date_merge_prefers_authority(self):
+        """In adjacent-date merge, higher authority should be winner."""
+        congress = Hearing(
+            "house.judiciary", "Judiciary",
+            "Oversight of Artificial Intelligence Regulation Policy",
+            "2026-02-10",
+            sources={"congress_api_event_id": "evt1"},
+            source_authority=4,
+        )
+        youtube = Hearing(
+            "house.judiciary", "Judiciary",
+            "Hearing: Oversight of Artificial Intelligence Regulation Policy Discussion",
+            "2026-02-11",
+            sources={"youtube_url": "yt", "youtube_id": "abc"},
+            source_authority=1,
+        )
+        result = _merge_adjacent_date_pairs([congress, youtube])
+        assert len(result) == 1
+        assert result[0].source_authority == 4
+        assert result[0].title == "Oversight of Artificial Intelligence Regulation Policy"
+        assert "youtube_url" in result[0].sources
+
+    def test_source_authority_default_zero(self):
+        """Hearing with no explicit source_authority should default to 0."""
+        h = Hearing("house.judiciary", "Judiciary", "Title", "2026-02-10")
+        assert h.source_authority == 0

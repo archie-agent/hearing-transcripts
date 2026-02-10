@@ -64,6 +64,7 @@ class Hearing:
     title: str
     date: str  # YYYY-MM-DD
     sources: dict = field(default_factory=dict)
+    source_authority: int = 0  # 0=unknown, 1=youtube, 2=website, 3=govinfo, 4=congress_api
     # sources can include:
     #   youtube_url, youtube_id,
     #   website_url, testimony_pdf_urls,
@@ -320,6 +321,7 @@ def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hear
                 title=title,
                 date=date_formatted,
                 sources=yt_source,
+                source_authority=1,
             ))
             dur_str = f"{duration // 60}m{duration % 60:02d}s"
             log.debug("  YouTube hearing: %s (%s) %s", vid_id, dur_str, title[:60])
@@ -536,6 +538,7 @@ def discover_website(committee_key: str, meta: dict, days: int = 1) -> list[Hear
                 title=s.title,
                 date=s.date,
                 sources={"website_url": s.url},
+                source_authority=2,
             ))
         return hearings
 
@@ -561,6 +564,7 @@ def discover_website(committee_key: str, meta: dict, days: int = 1) -> list[Hear
             title=s.title,
             date=s.date,
             sources={"website_url": s.url},
+            source_authority=2,
         ))
 
     return hearings
@@ -858,6 +862,7 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
                     title=title,
                     date=date_formatted,
                     sources=sources,
+                    source_authority=4,
                 ))
                 log.debug("  congress.gov: %s %s %s", date_formatted,
                           committee_key, title[:60])
@@ -945,6 +950,7 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
             title=title,
             date=date_issued,
             sources={"govinfo_package_id": pkg_id},
+            source_authority=3,
         ))
 
     log.info("GovInfo: %d packages after date filtering (floor: %s)", len(hearings), date_floor)
@@ -1079,10 +1085,10 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
     if n_filtered:
         log.info("Filtered %d markups/procedural entries", n_filtered)
 
-    # Sort so YouTube entries come last in dedup.  Website and congress.gov
-    # entries establish canonical hearing dates; YouTube entries (whose upload
-    # dates may be +1 day) merge into them via adjacent-date matching.
-    all_hearings.sort(key=lambda h: (1 if "youtube_id" in h.sources else 0))
+    # Sort by source authority descending: congress.gov (4) first, YouTube (1)
+    # last.  Higher-authority entries establish canonical titles and dates;
+    # lower-authority entries merge into them.
+    all_hearings.sort(key=lambda h: -h.source_authority)
 
     # Deduplicate (same committee key)
     deduped = _deduplicate(all_hearings)
@@ -1234,7 +1240,10 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
         if dedup_key in merged:
             existing = merged[dedup_key]
             existing.sources.update(h.sources)
-            if len(h.title) > len(existing.title):
+            if h.source_authority > existing.source_authority:
+                existing.title = h.title
+                existing.source_authority = h.source_authority
+            elif h.source_authority == existing.source_authority and len(h.title) > len(existing.title):
                 existing.title = h.title
         else:
             # Fuzzy fallback: check if any existing hearing for the same
@@ -1275,7 +1284,10 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
 
             if fuzzy_match:
                 fuzzy_match.sources.update(h.sources)
-                if len(h.title) > len(fuzzy_match.title):
+                if h.source_authority > fuzzy_match.source_authority:
+                    fuzzy_match.title = h.title
+                    fuzzy_match.source_authority = h.source_authority
+                elif h.source_authority == fuzzy_match.source_authority and len(h.title) > len(fuzzy_match.title):
                     fuzzy_match.title = h.title
             else:
                 merged[dedup_key] = h
@@ -1313,12 +1325,18 @@ def _merge_adjacent_date_pairs(hearings: list[Hearing]) -> list[Hearing]:
                 if not (_has_youtube_source(h) or _has_youtube_source(other)):
                     continue
                 if _title_similarity(h.title, other.title) >= 0.45:
-                    # Merge: keep the one with more sources, prefer earlier date
-                    winner, loser = (h, other) if len(h.sources) >= len(other.sources) else (other, h)
+                    # Merge: prefer higher authority, then more sources
+                    if h.source_authority != other.source_authority:
+                        winner, loser = (h, other) if h.source_authority >= other.source_authority else (other, h)
+                    else:
+                        winner, loser = (h, other) if len(h.sources) >= len(other.sources) else (other, h)
                     winner.sources.update(loser.sources)
                     if loser.date < winner.date:
                         winner.date = loser.date
-                    if len(loser.title) > len(winner.title):
+                    if loser.source_authority > winner.source_authority:
+                        winner.title = loser.title
+                        winner.source_authority = loser.source_authority
+                    elif loser.source_authority == winner.source_authority and len(loser.title) > len(winner.title):
                         winner.title = loser.title
                     absorbed.add(j if winner is h else i)
                     log.debug("Post-dedup merge: '%s' (%s) <- '%s' (%s)",
@@ -1430,7 +1448,10 @@ def _cross_committee_dedup(hearings: list[Hearing]) -> list[Hearing]:
                         h_i.committee_key = h_j.committee_key
                         h_i.committee_name = h_j.committee_name
                     h_i.sources.update(h_j.sources)
-                    if len(h_j.title) > len(h_i.title):
+                    if h_j.source_authority > h_i.source_authority:
+                        h_i.title = h_j.title
+                        h_i.source_authority = h_j.source_authority
+                    elif h_j.source_authority == h_i.source_authority and len(h_j.title) > len(h_i.title):
                         h_i.title = h_j.title
                     merged_into[j] = i
 

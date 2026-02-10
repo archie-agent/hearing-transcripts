@@ -27,13 +27,111 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import config
-from discover import Hearing, discover_all
+from discover import Hearing, discover_all, _title_similarity
 from extract import fetch_govinfo_transcript, process_testimony_pdfs
 from alerts import check_and_alert
 from state import State
 from transcribe import process_hearing_audio
 
 log = logging.getLogger(__name__)
+
+
+def _reconcile_hearing_id(hearing: Hearing, state: State) -> str | None:
+    """Check if this hearing already exists in state DB under a different ID.
+
+    When a hearing's title changes (e.g. YouTube title replaced by congress.gov
+    title), its computed ID changes.  This function detects the old record and
+    migrates it to the new ID.
+
+    Returns the old ID if migration happened, None otherwise.
+    """
+    new_id = hearing.id
+
+    # 1. Look up by congress.gov event ID (strongest signal)
+    event_id = hearing.sources.get("congress_api_event_id")
+    if event_id:
+        existing = state.find_by_congress_event_id(event_id)
+        if existing and existing["id"] != new_id:
+            old_id = existing["id"]
+            _migrate_hearing_id(old_id, hearing, state)
+            return old_id
+
+    # 2. Fallback: look up by committee + date with fuzzy title match
+    candidates = state.find_by_committee_date(hearing.committee_key, hearing.date)
+    for candidate in candidates:
+        if candidate["id"] == new_id:
+            continue
+        if _title_similarity(hearing.title, candidate["title"]) >= 0.30:
+            old_id = candidate["id"]
+            _migrate_hearing_id(old_id, hearing, state)
+            return old_id
+
+    return None
+
+
+def _migrate_hearing_id(old_id: str, hearing: Hearing, state: State) -> None:
+    """Migrate state DB records and transcript files from old_id to new hearing ID."""
+    new_id = hearing.id
+    log.info("Migrating hearing ID: %s -> %s (%s)", old_id, new_id, hearing.title[:60])
+
+    conn = state._get_conn()
+    try:
+        # Copy processing_steps from old to new
+        conn.execute("""
+            INSERT OR IGNORE INTO processing_steps (hearing_id, step, status, started_at, completed_at, error)
+            SELECT ?, step, status, started_at, completed_at, error
+            FROM processing_steps WHERE hearing_id = ?
+        """, (new_id, old_id))
+
+        # Copy cspan_title_searches
+        conn.execute("""
+            INSERT OR IGNORE INTO cspan_title_searches (hearing_id, searched_at, found)
+            SELECT ?, searched_at, found
+            FROM cspan_title_searches WHERE hearing_id = ?
+        """, (new_id, old_id))
+
+        # Delete old rows
+        conn.execute("DELETE FROM processing_steps WHERE hearing_id = ?", (old_id,))
+        conn.execute("DELETE FROM cspan_title_searches WHERE hearing_id = ?", (old_id,))
+        conn.execute("DELETE FROM hearings WHERE id = ?", (old_id,))
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Rename transcript directory
+    for committee_dir in config.TRANSCRIPTS_DIR.glob("*/"):
+        old_dir = committee_dir / f"{hearing.date}_{old_id}"
+        if old_dir.is_dir():
+            new_dir = committee_dir / f"{hearing.date}_{new_id}"
+            if new_dir.exists():
+                # Merge: copy files from old that don't exist in new
+                for f in old_dir.iterdir():
+                    dst = new_dir / f.name
+                    if not dst.exists():
+                        if f.is_dir():
+                            shutil.copytree(f, dst)
+                        else:
+                            shutil.copy2(f, dst)
+                shutil.rmtree(old_dir)
+            else:
+                old_dir.rename(new_dir)
+            log.info("  Renamed transcript dir: %s -> %s", old_dir.name, new_dir.name)
+
+    # Update index.json
+    index_path = config.TRANSCRIPTS_DIR / "index.json"
+    if index_path.exists():
+        try:
+            index = json.loads(index_path.read_text())
+            for entry in index.get("hearings", []):
+                if entry.get("id") == old_id:
+                    entry["id"] = new_id
+                    entry["title"] = hearing.title
+                    entry["path"] = f"{hearing.committee_key}/{hearing.date}_{new_id}"
+                    break
+            index_path.write_text(json.dumps(index, indent=2))
+        except (json.JSONDecodeError, OSError):
+            pass
 
 
 def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
@@ -348,6 +446,12 @@ def main():
     if not hearings:
         log.info("No new hearings found.")
         return
+
+    # Reconcile hearing IDs: if a hearing was previously stored under a
+    # different ID (e.g. YouTube title, now replaced by congress.gov title),
+    # migrate state DB records and transcript files to the new canonical ID.
+    for h in hearings:
+        _reconcile_hearing_id(h, state)
 
     # Filter out already-processed hearings (unless --reprocess)
     if args.reprocess:
