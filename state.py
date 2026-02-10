@@ -95,6 +95,16 @@ class State:
                 )
             """)
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS digest_runs (
+                    run_date TEXT PRIMARY KEY,
+                    hearings_scanned INTEGER DEFAULT 0,
+                    quotes_extracted INTEGER DEFAULT 0,
+                    quotes_selected INTEGER DEFAULT 0,
+                    cost_usd REAL DEFAULT 0
+                )
+            """)
+
             # Migration: add congress_event_id for cross-run identity matching
             try:
                 conn.execute("ALTER TABLE hearings ADD COLUMN congress_event_id TEXT")
@@ -491,6 +501,37 @@ class State:
                     found = excluded.found
             """, (hearing_id, now, 1 if found else 0))
             conn.commit()
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------
+    # Digest tracking
+    # ------------------------------------------------------------------
+
+    def record_digest_run(self, run_date: str, hearings_scanned: int,
+                          quotes_extracted: int, quotes_selected: int,
+                          cost_usd: float) -> None:
+        """Record a digest run."""
+        conn = self._get_conn()
+        try:
+            conn.execute("""
+                INSERT OR REPLACE INTO digest_runs
+                    (run_date, hearings_scanned, quotes_extracted, quotes_selected, cost_usd)
+                VALUES (?, ?, ?, ?, ?)
+            """, (run_date, hearings_scanned, quotes_extracted, quotes_selected, cost_usd))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def last_digest_date(self) -> str | None:
+        """Return the most recent digest run date, or None."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                "SELECT MAX(run_date) as latest FROM digest_runs"
+            )
+            row = cursor.fetchone()
+            return row["latest"] if row and row["latest"] else None
         finally:
             conn.close()
 

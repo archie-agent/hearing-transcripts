@@ -98,6 +98,16 @@ def get_committees(max_tier: int = 99) -> dict[str, dict]:
     return {k: v for k, v in COMMITTEES.items() if v.get("tier", 3) <= max_tier}
 
 
+# ---------------------------------------------------------------------------
+# Digest settings
+# ---------------------------------------------------------------------------
+DIGEST_MODEL = os.environ.get("DIGEST_MODEL", "google/gemini-3-flash-preview")
+DIGEST_POLISH_MODEL = os.environ.get("DIGEST_POLISH_MODEL", "anthropic/claude-haiku-4-5")
+DIGEST_RECIPIENT = os.environ.get("DIGEST_RECIPIENT", "archiehk98@gmail.com")
+DIGEST_SCORE_THRESHOLD = float(os.environ.get("DIGEST_SCORE_THRESHOLD", "0.40"))
+DIGEST_LOOKBACK_DAYS = int(os.environ.get("DIGEST_LOOKBACK_DAYS", "4"))
+
+
 def get_committee_meta(key: str) -> dict | None:
     """Look up committee info by dotted key like 'house.judiciary'."""
     return COMMITTEES.get(key)

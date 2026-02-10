@@ -31,6 +31,7 @@ from discover import Hearing, discover_all, _title_similarity
 from extract import fetch_govinfo_transcript, process_testimony_pdfs
 from alerts import check_and_alert
 from state import State
+from cleanup import cleanup_transcript
 from transcribe import process_hearing_audio
 
 log = logging.getLogger(__name__)
@@ -216,6 +217,32 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
         else:
             log.debug("ISVP transcript already fetched for %s", hearing.id)
 
+        # ISVP cleanup (text quality only, speaker labels already present)
+        if config.CLEANUP_MODEL and not state.is_step_done(hearing.id, "isvp_cleanup"):
+            isvp_raw_path = hearing_dir / "isvp_transcript.txt"
+            if isvp_raw_path.exists():
+                try:
+                    isvp_raw = isvp_raw_path.read_text()
+                    cleanup_result = cleanup_transcript(
+                        isvp_raw,
+                        hearing_title=hearing.title,
+                        committee_name=hearing.committee_name,
+                        skip_diarization=True,
+                    )
+                    cleaned_path = hearing_dir / "isvp_cleaned.txt"
+                    cleaned_path.write_text(cleanup_result.text)
+                    result["outputs"]["isvp_cleaned"] = str(cleaned_path)
+                    cost["llm_cleanup_usd"] += cleanup_result.cost_usd
+                    state.mark_step(hearing.id, "isvp_cleanup", "done")
+                    log.info(
+                        "ISVP cleanup: %d→%d chars, $%.4f for %s",
+                        len(isvp_raw), len(cleanup_result.text),
+                        cleanup_result.cost_usd, hearing.id,
+                    )
+                except Exception as e:
+                    state.mark_step(hearing.id, "isvp_cleanup", "failed", error=str(e))
+                    log.error("ISVP cleanup failed for %s: %s", hearing.id, e)
+
     # 1.6. C-SPAN broadcast captions
     cspan_url = hearing.sources.get("cspan_url")
     if cspan_url:
@@ -241,6 +268,32 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
                 log.error("C-SPAN caption fetch failed for %s: %s", hearing.id, e)
         else:
             log.debug("C-SPAN transcript already fetched for %s", hearing.id)
+
+        # C-SPAN cleanup (text quality only, speaker labels already present)
+        if config.CLEANUP_MODEL and not state.is_step_done(hearing.id, "cspan_cleanup"):
+            cspan_raw_path = hearing_dir / "cspan_transcript.txt"
+            if cspan_raw_path.exists():
+                try:
+                    cspan_raw = cspan_raw_path.read_text()
+                    cleanup_result = cleanup_transcript(
+                        cspan_raw,
+                        hearing_title=hearing.title,
+                        committee_name=hearing.committee_name,
+                        skip_diarization=True,
+                    )
+                    cleaned_path = hearing_dir / "cspan_cleaned.txt"
+                    cleaned_path.write_text(cleanup_result.text)
+                    result["outputs"]["cspan_cleaned"] = str(cleaned_path)
+                    cost["llm_cleanup_usd"] += cleanup_result.cost_usd
+                    state.mark_step(hearing.id, "cspan_cleanup", "done")
+                    log.info(
+                        "C-SPAN cleanup: %d→%d chars, $%.4f for %s",
+                        len(cspan_raw), len(cleanup_result.text),
+                        cleanup_result.cost_usd, hearing.id,
+                    )
+                except Exception as e:
+                    state.mark_step(hearing.id, "cspan_cleanup", "failed", error=str(e))
+                    log.error("C-SPAN cleanup failed for %s: %s", hearing.id, e)
     # (If no cspan_url, leave cspan step unmarked so it can be retried
     # if a URL is discovered on a future run.)
 
@@ -302,32 +355,40 @@ def _publish_to_transcripts(hearing: Hearing, run_hearing_dir: Path, result: dic
 
     # Determine best transcript by priority:
     #   1. GovInfo official transcript (authoritative, months delayed)
-    #   2. C-SPAN broadcast captions (professional stenographers, immediate)
-    #   3. Senate ISVP captions (broadcast-quality CART/stenographer)
-    #   4. YouTube + LLM diarized (ASR quality, LLM-improved)
-    #   5. Raw YouTube captions (worst)
+    #   2. C-SPAN cleaned → C-SPAN raw (professional stenographers, immediate)
+    #   3. ISVP cleaned → ISVP raw (broadcast-quality CART/stenographer)
+    #   4. YouTube + LLM diarized → raw YouTube captions (ASR quality)
     best_transcript = None
+    outputs = result.get("outputs", {})
 
     # Priority 1: GovInfo official transcript
-    govinfo = result.get("outputs", {}).get("govinfo_transcript")
+    govinfo = outputs.get("govinfo_transcript")
     if govinfo:
         best_transcript = Path(govinfo)
 
-    # Priority 2: C-SPAN broadcast captions
+    # Priority 2: C-SPAN cleaned, then raw
     if best_transcript is None:
-        cspan_path = result.get("outputs", {}).get("cspan_transcript")
-        if cspan_path:
-            best_transcript = Path(cspan_path)
+        cspan_cleaned = outputs.get("cspan_cleaned")
+        if cspan_cleaned:
+            best_transcript = Path(cspan_cleaned)
+        else:
+            cspan_raw = outputs.get("cspan_transcript")
+            if cspan_raw:
+                best_transcript = Path(cspan_raw)
 
-    # Priority 3: Senate ISVP captions
+    # Priority 3: ISVP cleaned, then raw
     if best_transcript is None:
-        isvp_path = result.get("outputs", {}).get("isvp_transcript")
-        if isvp_path:
-            best_transcript = Path(isvp_path)
+        isvp_cleaned = outputs.get("isvp_cleaned")
+        if isvp_cleaned:
+            best_transcript = Path(isvp_cleaned)
+        else:
+            isvp_raw = outputs.get("isvp_transcript")
+            if isvp_raw:
+                best_transcript = Path(isvp_raw)
 
-    # Priority 3-4: YouTube cleaned or raw captions
+    # Priority 4: YouTube cleaned or raw captions
     if best_transcript is None:
-        audio = result.get("outputs", {}).get("audio", {})
+        audio = outputs.get("audio", {})
         if isinstance(audio, dict):
             if audio.get("cleaned_transcript"):
                 best_transcript = Path(audio["cleaned_transcript"])

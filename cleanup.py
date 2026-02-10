@@ -137,6 +137,63 @@ Provide the cleaned and diarized transcript:"""
     return prompt
 
 
+def _build_cleanup_prompt(
+    raw_text: str,
+    hearing_title: str = "",
+    committee_name: str = "",
+    chunk_index: int = 0,
+    total_chunks: int = 1,
+) -> str:
+    """Build the prompt for cleanup-only (no diarization).
+
+    Used for C-SPAN and ISVP transcripts that already have speaker labels.
+    Fixes capitalization, punctuation, transcription errors, and formatting
+    artifacts while preserving existing speaker labels exactly as-is.
+
+    Args:
+        raw_text: Raw transcript text to clean up
+        hearing_title: Title of the hearing (optional)
+        committee_name: Name of the committee (optional)
+        chunk_index: Current chunk index (for multi-chunk processing)
+        total_chunks: Total number of chunks
+
+    Returns:
+        Formatted prompt string
+    """
+    context = []
+    if hearing_title:
+        context.append(f"Hearing: {hearing_title}")
+    if committee_name:
+        context.append(f"Committee: {committee_name}")
+
+    context_str = "\n".join(context) if context else "Congressional hearing"
+
+    chunk_info = ""
+    if total_chunks > 1:
+        chunk_info = f"\n\nNote: This is chunk {chunk_index + 1} of {total_chunks}. Maintain consistency across chunks."
+
+    prompt = f"""You are cleaning up a congressional hearing transcript. The transcript already has speaker labels — your job is ONLY to fix text quality issues.
+
+{context_str}
+
+Instructions:
+1. Fix capitalization errors (e.g. ALL CAPS text should be properly recased to standard sentence case)
+2. Fix punctuation — add missing periods, commas, question marks where appropriate
+3. Fix obvious transcription errors and misspellings
+4. Clean up stutters, repeated words/phrases, and rolling caption artifacts (e.g. "the the economy" → "the economy")
+5. PRESERVE all existing speaker labels exactly as they appear — do NOT add, remove, rename, or reformat any speaker labels
+6. PRESERVE the overall structure and paragraph breaks
+7. Do NOT add any new content or commentary — only fix errors in the existing text
+
+Raw transcript:{chunk_info}
+
+{raw_text}
+
+Provide the cleaned transcript:"""
+
+    return prompt
+
+
 def _estimate_tokens(text: str) -> int:
     """Estimate token count (rough approximation: 1 token ≈ 4 characters).
 
@@ -276,19 +333,22 @@ def cleanup_transcript(
     hearing_title: str = "",
     committee_name: str = "",
     model: str | None = None,
+    skip_diarization: bool = False,
 ) -> CleanupResult:
-    """Clean up and diarize raw caption text.
+    """Clean up raw transcript text, optionally adding speaker diarization.
 
-    Processes congressional hearing captions by:
+    Processes congressional hearing transcripts by:
     - Fixing punctuation, capitalization, and transcription errors
-    - Adding speaker labels based on procedural cues
+    - Adding speaker labels based on procedural cues (unless skip_diarization=True)
     - Chunking long transcripts with overlap for context
 
     Args:
-        raw_text: Raw caption text from YouTube
+        raw_text: Raw transcript text
         hearing_title: Title of the hearing (helps with context)
         committee_name: Name of the committee (helps with context)
         model: OpenRouter model to use
+        skip_diarization: If True, only clean up text without adding speaker labels.
+            Use for transcripts that already have speaker labels (C-SPAN, ISVP).
 
     Returns:
         CleanupResult with cleaned text and metadata
@@ -322,7 +382,8 @@ def cleanup_transcript(
     for i, chunk in enumerate(chunks):
         logger.info(f"Processing chunk {i + 1}/{len(chunks)}")
 
-        prompt = _build_diarization_prompt(
+        build_prompt = _build_cleanup_prompt if skip_diarization else _build_diarization_prompt
+        prompt = build_prompt(
             chunk,
             hearing_title=hearing_title,
             committee_name=committee_name,
