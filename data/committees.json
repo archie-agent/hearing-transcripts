@@ -205,6 +205,7 @@
       "cspan_id": 2115,
       "tier": 2,
       "youtube": [
+        "https://www.youtube.com/@HouseJudiciary",
         "https://www.youtube.com/@USHouseJudiciaryGOP"
       ],
       "website": "https://judiciary.house.gov",
@@ -287,7 +288,8 @@
       "tier": 2,
       "youtube": [
         "https://www.youtube.com/user/HouseVetsAffairs",
-        "https://www.youtube.com/@HouseVeteransAffairs"
+        "https://www.youtube.com/@HouseVeteransAffairs",
+        "https://www.youtube.com/@DemocratsVeteransAffairs"
       ],
       "website": "https://veterans.house.gov",
       "hearings_url": "https://veterans.house.gov/calendar/",

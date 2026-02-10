@@ -35,6 +35,11 @@ _TESTIMONY_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+# YouTube embed pattern (VIDEO_ID is always exactly 11 chars)
+_YOUTUBE_EMBED_RE = re.compile(
+    r'youtube\.com/embed/([A-Za-z0-9_-]{11})', re.IGNORECASE
+)
+
 # Keywords to exclude -- navigation, procedural, or media links
 _EXCLUDE_KEYWORDS = re.compile(
     r"livestream|webcast|video|archive|press\s+release|"
@@ -46,6 +51,24 @@ _EXCLUDE_KEYWORDS = re.compile(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _extract_youtube_embeds(html: str) -> list[dict]:
+    """Extract YouTube video IDs from iframe embeds on a detail page."""
+    soup = BeautifulSoup(html, "lxml")
+    results = []
+    seen: set[str] = set()
+    for iframe in soup.find_all("iframe", src=True):
+        src = iframe.get("src", "")
+        m = _YOUTUBE_EMBED_RE.search(src)
+        if m and m.group(1) not in seen:
+            vid_id = m.group(1)
+            seen.add(vid_id)
+            results.append({
+                "youtube_id": vid_id,
+                "youtube_url": f"https://www.youtube.com/watch?v={vid_id}",
+            })
+    return results
 
 
 def _abs_url(href: str, base_url: str) -> str:
@@ -586,6 +609,16 @@ def scrape_hearing_detail(
                 "ISVP iframe detected for %s: comm=%s filename=%s",
                 committee_key, isvp_params["comm"], isvp_params["filename"],
             )
+
+    # -------------------------------------------------------------------
+    # YouTube embed detection (all committees)
+    # -------------------------------------------------------------------
+    if sources is not None and not sources.get("youtube_url"):
+        yt_embeds = _extract_youtube_embeds(html)
+        if yt_embeds:
+            sources["youtube_url"] = yt_embeds[0]["youtube_url"]
+            sources["youtube_id"] = yt_embeds[0]["youtube_id"]
+            log.info("YouTube embed found for %s: %s", committee_key, yt_embeds[0]["youtube_id"])
 
     # -------------------------------------------------------------------
     # Testimony PDF extraction

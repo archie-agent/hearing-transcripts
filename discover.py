@@ -1071,7 +1071,10 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
 
     # Filter markups and procedural sessions (not real hearings)
     before_filter = len(all_hearings)
-    all_hearings = [h for h in all_hearings if not _is_markup_or_procedural(h.title)]
+    all_hearings = [
+        h for h in all_hearings
+        if not _is_markup_or_procedural(h.title) or h.sources.get("youtube_url")
+    ]
     n_filtered = before_filter - len(all_hearings)
     if n_filtered:
         log.info("Filtered %d markups/procedural entries", n_filtered)
