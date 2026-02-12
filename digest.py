@@ -71,10 +71,17 @@ def find_recent_transcripts(lookback_days: int) -> list[dict]:
 
     cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
     recent = []
+    seen_ids: set[str] = set()
 
     for entry in data.get("hearings", []):
         if entry.get("date", "") < cutoff:
             continue
+
+        # Skip duplicate index entries
+        hearing_id = entry.get("id", "")
+        if hearing_id in seen_ids:
+            continue
+        seen_ids.add(hearing_id)
 
         transcript_dir = config.TRANSCRIPTS_DIR / entry["path"]
         transcript_file = transcript_dir / "transcript.txt"
@@ -157,19 +164,20 @@ def extract_quotes_from_transcript(
         prompt = EXTRACT_PROMPT.format(text=chunk)
         try:
             response = _call_openrouter(prompt, config.DIGEST_MODEL, api_key)
+
+            usage = response.get("usage", {})
+            cost = _calculate_cost(
+                config.DIGEST_MODEL,
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+            )
+            total_cost += cost
+
+            raw = response["choices"][0]["message"]["content"]
         except Exception:
-            logger.exception("API error extracting quotes for %s", hearing["id"])
+            logger.exception("API/parse error extracting quotes for %s", hearing["id"])
             continue
 
-        usage = response.get("usage", {})
-        cost = _calculate_cost(
-            config.DIGEST_MODEL,
-            usage.get("prompt_tokens", 0),
-            usage.get("completion_tokens", 0),
-        )
-        total_cost += cost
-
-        raw = response["choices"][0]["message"]["content"]
         # Strip markdown code fences if present
         raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
         raw = re.sub(r"\s*```$", "", raw.strip())
@@ -279,18 +287,17 @@ def compose_digest(quotes: list[Quote], api_key: str) -> tuple[str, float]:
 
     try:
         response = _call_openrouter(prompt, config.DIGEST_MODEL, api_key, timeout=180.0)
+        usage = response.get("usage", {})
+        cost = _calculate_cost(
+            config.DIGEST_MODEL,
+            usage.get("prompt_tokens", 0),
+            usage.get("completion_tokens", 0),
+        )
+        body = response["choices"][0]["message"]["content"]
     except Exception:
         logger.exception("Failed to compose digest")
         return "", 0.0
 
-    usage = response.get("usage", {})
-    cost = _calculate_cost(
-        config.DIGEST_MODEL,
-        usage.get("prompt_tokens", 0),
-        usage.get("completion_tokens", 0),
-    )
-
-    body = response["choices"][0]["message"]["content"]
     logger.info("Composed digest (%d chars, $%.4f)", len(body), cost)
     return body, cost
 
@@ -318,18 +325,17 @@ def polish_digest(body: str, api_key: str) -> tuple[str, float]:
 
     try:
         response = _call_openrouter(prompt, config.DIGEST_POLISH_MODEL, api_key, timeout=120.0)
+        usage = response.get("usage", {})
+        cost = _calculate_cost(
+            config.DIGEST_POLISH_MODEL,
+            usage.get("prompt_tokens", 0),
+            usage.get("completion_tokens", 0),
+        )
+        polished = response["choices"][0]["message"]["content"]
     except Exception:
         logger.exception("Polish step failed, using unpolished version")
         return body, 0.0
 
-    usage = response.get("usage", {})
-    cost = _calculate_cost(
-        config.DIGEST_POLISH_MODEL,
-        usage.get("prompt_tokens", 0),
-        usage.get("completion_tokens", 0),
-    )
-
-    polished = response["choices"][0]["message"]["content"]
     logger.info("Polished digest (%d chars, $%.4f)", len(polished), cost)
     return polished, cost
 
