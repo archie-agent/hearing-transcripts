@@ -37,7 +37,6 @@ from state import State
 log = logging.getLogger(__name__)
 
 MAX_QUOTES = 30
-AGENTMAIL_SENDER = "archie-agent@agentmail.to"
 
 
 @dataclass
@@ -537,7 +536,7 @@ def deliver_digest(
 
     try:
         client.inboxes.messages.send(
-            inbox_id=AGENTMAIL_SENDER,
+            inbox_id=config.AGENTMAIL_SENDER,
             to=config.DIGEST_RECIPIENT,
             subject=subject,
             text=markdown,

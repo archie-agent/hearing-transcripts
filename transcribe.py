@@ -132,7 +132,7 @@ def download_audio(youtube_url: str, output_dir: Path) -> Path | None:
 
 def transcribe_audio(audio_path: Path) -> str | None:
     """Transcribe audio file via OpenAI Whisper API. Handles chunking for large files."""
-    if not config.OPENAI_API_KEY:
+    if not config.get_openai_api_key():
         log.warning("No OPENAI_API_KEY set, skipping transcription")
         return None
     if config.TRANSCRIPTION_BACKEND == "captions-only":
@@ -140,7 +140,7 @@ def transcribe_audio(audio_path: Path) -> str | None:
         return None
 
     from openai import OpenAI
-    client = OpenAI(api_key=config.OPENAI_API_KEY)
+    client = OpenAI(api_key=config.get_openai_api_key())
     file_size = audio_path.stat().st_size
 
     if file_size <= config.OPENAI_MAX_FILE_BYTES:

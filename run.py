@@ -490,11 +490,12 @@ def main():
 
     # Filter committees
     if args.committee:
-        if args.committee not in config.COMMITTEES:
+        all_committees = config.get_all_committees()
+        if args.committee not in all_committees:
             log.error("Unknown committee: %s", args.committee)
-            log.info("Available: %s", ", ".join(sorted(config.COMMITTEES.keys())))
+            log.info("Available: %s", ", ".join(sorted(all_committees.keys())))
             sys.exit(1)
-        active = {args.committee: config.COMMITTEES[args.committee]}
+        active = {args.committee: all_committees[args.committee]}
     elif args.tier:
         active = config.get_committees(max_tier=args.tier)
     else:

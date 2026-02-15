@@ -115,7 +115,7 @@ def fetch_govinfo_transcript(package_id: str, output_dir: Path) -> Path | None:
     Tries direct package endpoints (htm, then pdf) since the summary download
     links often only include premis/zip/mods but not the actual content links.
     """
-    api_key = config.GOVINFO_API_KEY
+    api_key = config.get_govinfo_api_key()
 
     # Try HTML first (cleanest), then PDF
     for ext in ("htm", "pdf"):

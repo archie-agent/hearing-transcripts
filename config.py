@@ -31,23 +31,24 @@ COMMITTEES_JSON = DATA_DIR / "committees.json"
 def get_openai_api_key() -> str:
     return os.environ.get("OPENAI_API_KEY", "")
 
+_demo_key_warned = False
+
+
 def get_govinfo_api_key() -> str:
-    return os.environ.get("GOVINFO_API_KEY", "DEMO_KEY")
+    global _demo_key_warned
+    key = os.environ.get("GOVINFO_API_KEY", "DEMO_KEY")
+    if key == "DEMO_KEY" and not _demo_key_warned:
+        _demo_key_warned = True
+        log.warning("Using GovInfo DEMO_KEY (40 req/min, 1000/hr). Register free at api.data.gov")
+    return key
+
 
 def get_congress_api_key() -> str:
     return os.environ.get("CONGRESS_API_KEY", get_govinfo_api_key())
 
+
 def get_openrouter_api_key() -> str:
     return os.environ.get("OPENROUTER_API_KEY", "")
-
-if get_govinfo_api_key() == "DEMO_KEY":
-    log.warning("Using GovInfo DEMO_KEY (40 req/min, 1000/hr). Register free at api.data.gov")
-
-# Backward-compatible module-level constants (read once at import time)
-OPENAI_API_KEY = get_openai_api_key()
-GOVINFO_API_KEY = get_govinfo_api_key()
-CONGRESS_API_KEY = get_congress_api_key()
-OPENROUTER_API_KEY = get_openrouter_api_key()
 
 # ---------------------------------------------------------------------------
 # Model choices — single place to change LLM/transcription models
@@ -60,6 +61,13 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "google/gemini-3-flash-preview":   (0.50,  3.00),
     "anthropic/claude-haiku-4-5":      (1.00,  5.00),
 }
+
+# Validate MODEL_PRICING values at import time
+for _model_name, (_in_price, _out_price) in MODEL_PRICING.items():
+    if not isinstance(_in_price, (int, float)) or _in_price < 0:
+        raise ValueError(f"MODEL_PRICING[{_model_name!r}] input price must be non-negative float, got {_in_price!r}")
+    if not isinstance(_out_price, (int, float)) or _out_price < 0:
+        raise ValueError(f"MODEL_PRICING[{_model_name!r}] output price must be non-negative float, got {_out_price!r}")
 
 # LLM cleanup model for diarization + formatting of captions.
 # Runs via OpenRouter. Set to "" to skip cleanup.
@@ -118,11 +126,6 @@ def get_all_committees() -> dict[str, dict]:
     return _committees_cache
 
 
-# Backward-compatible module-level constant (property not possible at module level,
-# so this reads once at import time for existing callers).
-COMMITTEES: dict[str, dict] = get_all_committees()
-
-
 def get_committees(max_tier: int = 99) -> dict[str, dict]:
     """Return committees filtered by tier. Tier 1 = core economics, 2 = adjacent, 3 = peripheral."""
     return {k: v for k, v in get_all_committees().items() if v.get("tier", 3) <= max_tier}
@@ -136,6 +139,9 @@ DIGEST_POLISH_MODEL = os.environ.get("DIGEST_POLISH_MODEL", "anthropic/claude-ha
 DIGEST_RECIPIENT = os.environ.get("DIGEST_RECIPIENT", "archiehk98@gmail.com")
 DIGEST_SCORE_THRESHOLD = float(os.environ.get("DIGEST_SCORE_THRESHOLD", "0.40"))
 DIGEST_LOOKBACK_DAYS = int(os.environ.get("DIGEST_LOOKBACK_DAYS", "4"))
+
+# AgentMail sender address for digest delivery
+AGENTMAIL_SENDER = os.environ.get("AGENTMAIL_SENDER", "archie-agent@agentmail.to")
 
 
 def get_committee_meta(key: str) -> dict | None:

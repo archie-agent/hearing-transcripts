@@ -56,7 +56,7 @@ class TestDiscoverYouTube:
 
     @pytest.fixture(scope="class")
     def hearings(self) -> list[Hearing]:
-        meta = config.COMMITTEES[self.COMMITTEE_KEY]
+        meta = config.get_all_committees()[self.COMMITTEE_KEY]
         return discover_youtube(self.COMMITTEE_KEY, meta, days=7)
 
     def test_returns_list(self, hearings):
@@ -101,7 +101,7 @@ class TestScrapeWebsite:
 
     @pytest.fixture(scope="class")
     def meta(self) -> dict:
-        return config.COMMITTEES[self.COMMITTEE_KEY]
+        return config.get_all_committees()[self.COMMITTEE_KEY]
 
     @pytest.fixture(scope="class")
     def results(self, meta) -> list[ScrapedHearing]:

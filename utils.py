@@ -76,7 +76,7 @@ _TITLE_STRIP_RES = [
     re.compile(r"\s+(Location|Time):.*$", re.IGNORECASE),
     re.compile(r"WASHINGTON,?\s*D\.?C\.?\s*[-–—].*$", re.IGNORECASE),
 ]
-_TITLE_CLEAN_RE = re.compile(r"[^a-z0-9\s]")
+TITLE_CLEAN_RE = re.compile(r"[^a-z0-9\s]")
 
 
 def normalize_title(title: str) -> str:
@@ -87,5 +87,5 @@ def normalize_title(title: str) -> str:
     """
     for pattern in _TITLE_STRIP_RES:
         title = pattern.sub("", title)
-    words = _TITLE_CLEAN_RE.sub("", title.lower()).split()[:8]
+    words = TITLE_CLEAN_RE.sub("", title.lower()).split()[:8]
     return " ".join(words)

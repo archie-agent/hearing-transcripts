@@ -21,7 +21,7 @@ import httpx
 import config
 import scrapers
 from detail_scraper import scrape_hearing_detail
-from utils import TITLE_STOPWORDS, USER_AGENT, RateLimiter, YT_DLP_ENV, normalize_title, _TITLE_CLEAN_RE
+from utils import TITLE_CLEAN_RE, TITLE_STOPWORDS, USER_AGENT, RateLimiter, YT_DLP_ENV, normalize_title
 
 log = logging.getLogger(__name__)
 
@@ -902,7 +902,7 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
             committee_key = f"govinfo.{chamber}"
 
         # Resolve committee name from config if we have a real key
-        committee_meta = config.COMMITTEES.get(committee_key)
+        committee_meta = config.get_all_committees().get(committee_key)
         if committee_meta:
             committee_name = committee_meta.get("name", committee_key)
         else:
@@ -1329,8 +1329,8 @@ _CROSS_DEDUP_THRESHOLD = 0.4
 
 def title_similarity(title_a: str, title_b: str) -> float:
     """Jaccard similarity of word tokens between two titles."""
-    words_a = set(_TITLE_CLEAN_RE.sub("", title_a.lower()).split())
-    words_b = set(_TITLE_CLEAN_RE.sub("", title_b.lower()).split())
+    words_a = set(TITLE_CLEAN_RE.sub("", title_a.lower()).split())
+    words_b = set(TITLE_CLEAN_RE.sub("", title_b.lower()).split())
     if not words_a or not words_b:
         return 0.0
     return len(words_a & words_b) / len(words_a | words_b)
@@ -1351,7 +1351,7 @@ def _is_specific_key(committee_key: str) -> bool:
     """Return True if the committee key refers to a real committee (not a generic govinfo fallback)."""
     if committee_key.startswith("govinfo."):
         return False
-    return committee_key in config.COMMITTEES
+    return committee_key in config.get_all_committees()
 
 
 def _preferred_key(key_a: str, key_b: str) -> str:
@@ -1362,8 +1362,8 @@ def _preferred_key(key_a: str, key_b: str) -> str:
         return key_a
     if b_specific and not a_specific:
         return key_b
-    # Both specific or both generic -- prefer the one in config.COMMITTEES
-    if key_a in config.COMMITTEES:
+    # Both specific or both generic -- prefer the one in config
+    if key_a in config.get_all_committees():
         return key_a
     return key_b
 
@@ -1453,7 +1453,7 @@ def _keyword_overlap(title_a: str, title_b: str) -> int:
     differences than Jaccard similarity (which penalizes differing lengths).
     """
     def _significant_words(text: str) -> set[str]:
-        words = set(_TITLE_CLEAN_RE.sub("", text.lower()).split())
+        words = set(TITLE_CLEAN_RE.sub("", text.lower()).split())
         return {w for w in words if len(w) >= 3 and w not in TITLE_STOPWORDS}
 
     words_a = _significant_words(title_a)
