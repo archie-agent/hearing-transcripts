@@ -88,40 +88,31 @@ class Hearing:
 
 
 # ---------------------------------------------------------------------------
-# Title normalization for dedup
+# Title normalization for dedup — pre-compiled patterns
 # ---------------------------------------------------------------------------
+
+_TITLE_STRIP_RES = [
+    re.compile(r"^HEARING NOTICE:?\s*", re.IGNORECASE),
+    re.compile(r"^Hearing\s+Entitled:?\s*", re.IGNORECASE),
+    re.compile(r"^Oversight\s+Hearing\s*[-:]\s*", re.IGNORECASE),
+    re.compile(r"^Hearings?\s*:?\s*", re.IGNORECASE),
+    re.compile(r"^(Full Committee |Subcommittee )?Hearing:?\s*", re.IGNORECASE),
+    re.compile(r"^[\w&]+\s+Hearing:?\s*", re.IGNORECASE),
+    re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}\s*"),
+    re.compile(r"^\*+[A-Z\s]+\*+\s*"),
+    re.compile(r"^Upcoming\s*:?\s*", re.IGNORECASE),
+    re.compile(r"^(An? )?(Oversight )?Hearing[s]?\s+to\s+(examine|consider)\s+", re.IGNORECASE),
+    re.compile(r"\s+(Location|Time):.*$", re.IGNORECASE),
+    re.compile(r"WASHINGTON,?\s*D\.?C\.?\s*[-–—].*$", re.IGNORECASE),
+]
+_TITLE_CLEAN_RE = re.compile(r"[^a-z0-9\s]")
+
 
 def _normalize_title(title: str) -> str:
     """Normalize a hearing title for comparison/dedup."""
-    # Specific multi-word prefixes first (before generic "Hearing" strip)
-    title = re.sub(r"^HEARING NOTICE:?\s*", "", title, flags=re.IGNORECASE)
-    title = re.sub(r"^Hearing\s+Entitled:?\s*", "", title, flags=re.IGNORECASE)
-    title = re.sub(r"^Oversight\s+Hearing\s*[-:]\s*", "", title, flags=re.IGNORECASE)
-    # Smushed "Hearings" (no space) before generic "Hearing:" — covers
-    # "Hearings02/4/2026Hit the Road..." from old website scrapes
-    title = re.sub(r"^Hearings?\s*:?\s*", "", title, flags=re.IGNORECASE)
-    title = re.sub(
-        r"^(Full Committee |Subcommittee )?Hearing:?\s*",
-        "", title, flags=re.IGNORECASE,
-    )
-    # Subcommittee-prefixed titles (Energy & Commerce pattern)
-    # e.g. "Energy Hearing:", "O&I Hearing:", "C&T Hearing:"
-    title = re.sub(r"^[\w&]+\s+Hearing:?\s*", "", title, flags=re.IGNORECASE)
-    # Strip smushed dates: "02/4/2026" or "2/04/26" at the start
-    title = re.sub(r"^\d{1,2}/\d{1,2}/\d{2,4}\s*", "", title)
-    # Strip **DATE CHANGE** or similar bracketed announcements
-    title = re.sub(r"^\*+[A-Z\s]+\*+\s*", "", title)
-    # Strip "Upcoming" prefix
-    title = re.sub(r"^Upcoming\s*:?\s*", "", title, flags=re.IGNORECASE)
-    # Strip congress.gov boilerplate prefixes
-    title = re.sub(
-        r"^(An? )?(Oversight )?Hearing[s]?\s+to\s+(examine|consider)\s+",
-        "", title, flags=re.IGNORECASE,
-    )
-    # Strip trailing metadata: "Location:...", "Time:...", "WASHINGTON, D.C. ..."
-    title = re.sub(r"\s+(Location|Time):.*$", "", title, flags=re.IGNORECASE)
-    title = re.sub(r"WASHINGTON,?\s*D\.?C\.?\s*[-–—].*$", "", title, flags=re.IGNORECASE)
-    words = re.sub(r"[^a-z0-9\s]", "", title.lower()).split()[:8]
+    for pattern in _TITLE_STRIP_RES:
+        title = pattern.sub("", title)
+    words = _TITLE_CLEAN_RE.sub("", title.lower()).split()[:8]
     return " ".join(words)
 
 

@@ -74,13 +74,10 @@ def hearing_id(committee_key: str, date: str, title: str) -> str:
     return hash_digest[:12]
 
 
-def normalize_title(title: str) -> str:
-    """Normalize a hearing title for comparison.
-    Strips common prefixes ('Full Committee Hearing:', 'HEARING NOTICE:', etc.),
-    lowercases, removes punctuation, returns first 8 words.
-    """
-    # Common prefixes to strip
-    prefixes = [
+# Pre-compiled patterns for normalize_title
+_TITLE_PREFIX_RES = [
+    re.compile(prefix, re.IGNORECASE)
+    for prefix in [
         r"^full committee hearing:\s*",
         r"^hearing notice:\s*",
         r"^subcommittee hearing:\s*",
@@ -89,16 +86,22 @@ def normalize_title(title: str) -> str:
         r"^hearing:\s*",
         r"^notice:\s*",
     ]
+]
+_PUNCT_RE = re.compile(r"[^\w\s]")
+_MULTI_SPACE_RE = re.compile(r"\s+")
 
-    # Apply prefix removal
+
+def normalize_title(title: str) -> str:
+    """Normalize a hearing title for comparison.
+    Strips common prefixes ('Full Committee Hearing:', 'HEARING NOTICE:', etc.),
+    lowercases, removes punctuation, returns first 8 words.
+    """
     normalized = title.lower()
-    for prefix in prefixes:
-        normalized = re.sub(prefix, "", normalized, flags=re.IGNORECASE)
+    for pattern in _TITLE_PREFIX_RES:
+        normalized = pattern.sub("", normalized)
 
-    # Remove punctuation and extra whitespace
-    normalized = re.sub(r"[^\w\s]", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = _PUNCT_RE.sub(" ", normalized)
+    normalized = _MULTI_SPACE_RE.sub(" ", normalized).strip()
 
-    # Return first 8 words
     words = normalized.split()
     return " ".join(words[:8])
