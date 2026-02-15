@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Quick coverage analysis: what sources does each hearing have?
 
-Runs fast discovery (skips C-SPAN WAF searches) and summarizes
-per-hearing and per-committee source availability.
+By default skips C-SPAN WAF searches (slow). Pass --with-cspan to include them.
 """
 from __future__ import annotations
 
+import argparse
 import logging
-import sys
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
@@ -22,16 +21,26 @@ from state import State
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
-# Monkey-patch to skip slow C-SPAN WAF searches (DDG, by-committee, targeted, rotation)
-import cspan as _cspan_mod
-_cspan_noop = lambda *a, **kw: []
-_cspan_mod.discover_cspan_google = _cspan_noop
-_cspan_mod.discover_cspan_by_committee = _cspan_noop
-_cspan_mod.discover_cspan_targeted = _cspan_noop
-_cspan_mod.discover_cspan_rotation = _cspan_noop
 
 def main():
-    days = int(sys.argv[1]) if len(sys.argv) > 1 else 14
+    parser = argparse.ArgumentParser(description="Hearing source coverage analysis")
+    parser.add_argument("--days", type=int, default=14, help="Days to look back (default: 14)")
+    parser.add_argument("--skip-cspan", action="store_true", default=True,
+                        help="Skip slow C-SPAN WAF searches (default: True)")
+    parser.add_argument("--with-cspan", action="store_true",
+                        help="Include C-SPAN WAF searches (overrides --skip-cspan)")
+    args = parser.parse_args()
+
+    skip_cspan = args.skip_cspan and not args.with_cspan
+    if skip_cspan:
+        import cspan as _cspan_mod
+        _noop = lambda *a, **kw: []
+        _cspan_mod.discover_cspan_google = _noop
+        _cspan_mod.discover_cspan_by_committee = _noop
+        _cspan_mod.discover_cspan_targeted = _noop
+        _cspan_mod.discover_cspan_rotation = _noop
+
+    days = args.days
     state = State()
     active = config.get_committees()
 

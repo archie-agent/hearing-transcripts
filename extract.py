@@ -103,9 +103,9 @@ def fetch_govinfo_transcript(package_id: str, output_dir: Path) -> Path | None:
 
     # Try HTML first (cleanest), then PDF
     for ext in ("htm", "pdf"):
-        url = f"https://api.govinfo.gov/packages/{package_id}/{ext}?api_key={api_key}"
+        url = f"https://api.govinfo.gov/packages/{package_id}/{ext}"
         try:
-            resp = httpx.get(url, timeout=120, follow_redirects=True)
+            resp = httpx.get(url, params={"api_key": api_key}, timeout=120, follow_redirects=True)
             if resp.status_code != 200:
                 continue
 

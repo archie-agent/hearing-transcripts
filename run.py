@@ -474,7 +474,7 @@ def main():
     elif args.tier:
         active = config.get_committees(max_tier=args.tier)
     else:
-        active = config.get_committees()  # default: tier <= 2
+        active = config.get_committees(max_tier=2)
 
     max_cost = args.max_cost or config.MAX_COST_PER_RUN
     state = State()
@@ -700,7 +700,7 @@ def main():
     )
 
     # Alert on persistently failing scrapers
-    check_and_alert(state)
+    check_and_alert(state, failing=failing)
 
 
 if __name__ == "__main__":

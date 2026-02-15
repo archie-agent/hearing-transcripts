@@ -70,12 +70,22 @@ def _post_to_slack(message: str, webhook_url: str) -> None:
         log.warning("Failed to send Slack alert: %s", exc)
 
 
-def check_and_alert(state: State, threshold: int = 3) -> list[dict]:
+def check_and_alert(
+    state: State,
+    threshold: int = 3,
+    failing: list[dict] | None = None,
+) -> list[dict]:
     """Check for failing scrapers and emit alerts if any are found.
+
+    Args:
+        state: State instance for DB queries.
+        threshold: Minimum consecutive failures to trigger alert.
+        failing: Pre-computed failing list (avoids duplicate DB query).
 
     Returns the list of failing scrapers (empty list if all healthy).
     """
-    failing = state.get_failing_scrapers(threshold=threshold)
+    if failing is None:
+        failing = state.get_failing_scrapers(threshold=threshold)
 
     if not failing:
         log.debug("All scrapers healthy (threshold=%d)", threshold)
