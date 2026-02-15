@@ -42,7 +42,7 @@ class CleanupResult:
 
 
 def _get_api_key() -> str:
-    """Get OpenRouter API key from env var or .env file.
+    """Get OpenRouter API key from environment (loaded by config.py via load_dotenv).
 
     Returns:
         API key string
@@ -50,24 +50,9 @@ def _get_api_key() -> str:
     Raises:
         ValueError: If API key cannot be found
     """
-    # Try environment variable first
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if api_key:
         return api_key
-
-    # Fall back to reading from .env file (project-local)
-    env_path = Path(__file__).parent / ".env"
-    if env_path.exists():
-        try:
-            with open(env_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("OPENROUTER_API_KEY="):
-                        api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                        if api_key:
-                            return api_key
-        except Exception as e:
-            logger.warning(f"Failed to read .env file: {e}")
 
     raise ValueError(
         "OPENROUTER_API_KEY not found. Set the environment variable or add it to .env"

@@ -84,10 +84,11 @@ def _load_committees() -> dict[str, dict]:
     try:
         with open(COMMITTEES_JSON) as f:
             data = json.load(f)
-        return data.get("committees", {})
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        log.error("Failed to load committees.json: %s", e)
-        return {}
+    except FileNotFoundError:
+        raise ValueError(f"committees.json not found at {COMMITTEES_JSON}")
+    except json.JSONDecodeError as e:
+        raise ValueError(f"committees.json is corrupt: {e}") from e
+    return data.get("committees", {})
 
 # Global committee registry. Keyed by "chamber.slug" (e.g., "house.ways_and_means").
 COMMITTEES: dict[str, dict] = _load_committees()

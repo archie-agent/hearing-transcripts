@@ -186,6 +186,7 @@ def fetch_isvp_captions(comm: str, filename: str) -> str | None:
 
         segments: list[str] = []
         empty_count = 0
+        fail_count = 0
         for uri in segment_uris:
             seg_url = urljoin(subtitle_url, uri)
             seg_text = _fetch_url(client, seg_url)
@@ -197,8 +198,16 @@ def fetch_isvp_captions(comm: str, filename: str) -> str | None:
                 else:
                     empty_count = 0
             else:
-                # A failed segment fetch is not fatal; skip and continue
+                fail_count += 1
                 log.debug("Skipped segment: %s", seg_url)
+
+        if fail_count and segment_uris:
+            fail_pct = fail_count / len(segment_uris)
+            if fail_pct > 0.5:
+                log.warning(
+                    "High segment failure rate for %s/%s: %d/%d (%.0f%%) failed",
+                    comm, filename, fail_count, len(segment_uris), fail_pct * 100,
+                )
 
     if not segments:
         log.warning("All VTT segments failed for %s/%s", comm, filename)

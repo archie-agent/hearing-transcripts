@@ -121,18 +121,15 @@ def _migrate_hearing_id(old_id: str, hearing: Hearing, state: State) -> None:
 
     # Update index.json
     index_path = config.TRANSCRIPTS_DIR / "index.json"
-    if index_path.exists():
-        try:
-            index = json.loads(index_path.read_text())
-            for entry in index.get("hearings", []):
-                if entry.get("id") == old_id:
-                    entry["id"] = new_id
-                    entry["title"] = hearing.title
-                    entry["path"] = f"{hearing.committee_key}/{hearing.date}_{new_id}"
-                    break
-            index_path.write_text(json.dumps(index, indent=2))
-        except (json.JSONDecodeError, OSError):
-            pass
+    index = _read_index(index_path)
+    if index is not None:
+        for entry in index.get("hearings", []):
+            if entry.get("id") == old_id:
+                entry["id"] = new_id
+                entry["title"] = hearing.title
+                entry["path"] = f"{hearing.committee_key}/{hearing.date}_{new_id}"
+                break
+        index_path.write_text(json.dumps(index, indent=2))
 
 
 def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
@@ -179,10 +176,7 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
                 cost["llm_cleanup_usd"] += audio_result.get("cleanup_cost_usd", 0)
                 cost["whisper_usd"] += audio_result.get("whisper_cost_usd", 0)
                 state.mark_step(hearing.id, "captions", "done")
-                if audio_result.get("cleaned_transcript"):
-                    state.mark_step(hearing.id, "cleanup", "done")
-                else:
-                    state.mark_step(hearing.id, "cleanup", "done")
+                state.mark_step(hearing.id, "cleanup", "done")
             except Exception as e:
                 state.mark_step(hearing.id, "captions", "failed", error=str(e))
                 log.error("Caption processing failed for %s: %s", hearing.id, e)
@@ -427,18 +421,23 @@ def _publish_to_transcripts(hearing: Hearing, run_hearing_dir: Path, result: dic
     log.info("Published to %s", transcript_dir)
 
 
+def _read_index(index_path: Path) -> dict | None:
+    """Read and parse index.json, returning None if absent or corrupt."""
+    if not index_path.exists():
+        return None
+    try:
+        return json.loads(index_path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning("Failed to read %s: %s", index_path, e)
+        return None
+
+
 def _update_index(results: list[dict]) -> None:
     """Update transcripts/index.json global manifest."""
     config.TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
     index_path = config.TRANSCRIPTS_DIR / "index.json"
 
-    if index_path.exists():
-        try:
-            existing = json.loads(index_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            existing = {"hearings": []}
-    else:
-        existing = {"hearings": []}
+    existing = _read_index(index_path) or {"hearings": []}
 
     existing_ids = {h["id"] for h in existing["hearings"] if "id" in h}
     for r in results:

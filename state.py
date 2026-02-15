@@ -106,10 +106,10 @@ class State:
             """)
 
             # Migration: add congress_event_id for cross-run identity matching
-            try:
+            cursor = conn.execute("PRAGMA table_info(hearings)")
+            existing_cols = {row["name"] for row in cursor.fetchall()}
+            if "congress_event_id" not in existing_cols:
                 conn.execute("ALTER TABLE hearings ADD COLUMN congress_event_id TEXT")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_hearings_congress_event_id
                 ON hearings(congress_event_id) WHERE congress_event_id IS NOT NULL
