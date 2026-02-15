@@ -342,55 +342,44 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
     return result
 
 
+# Transcript priority: highest quality first. Each entry is an output key,
+# or a tuple (output_key, sub_key) for nested dicts like audio.
+TRANSCRIPT_PRIORITY = [
+    "govinfo_transcript",
+    "cspan_cleaned",
+    "cspan_transcript",
+    "isvp_cleaned",
+    "isvp_transcript",
+    ("audio", "cleaned_transcript"),
+    ("audio", "captions"),
+]
+
+
+def _select_best_transcript(outputs: dict) -> Path | None:
+    """Return the highest-priority transcript path from outputs."""
+    for entry in TRANSCRIPT_PRIORITY:
+        if isinstance(entry, tuple):
+            outer, inner = entry
+            container = outputs.get(outer, {})
+            if isinstance(container, dict) and container.get(inner):
+                return Path(container[inner])
+        else:
+            val = outputs.get(entry)
+            if val:
+                return Path(val)
+    return None
+
+
 def _publish_to_transcripts(hearing: Hearing, run_hearing_dir: Path, result: dict) -> None:
     """Copy final artifacts to transcripts/{committee_key}/{date}_{id}/."""
     transcript_dir = config.TRANSCRIPTS_DIR / hearing.committee_key / f"{hearing.date}_{hearing.id}"
     transcript_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine best transcript by priority:
-    #   1. GovInfo official transcript (authoritative, months delayed)
-    #   2. C-SPAN cleaned → C-SPAN raw (professional stenographers, immediate)
-    #   3. ISVP cleaned → ISVP raw (broadcast-quality CART/stenographer)
-    #   4. YouTube + LLM diarized → raw YouTube captions (ASR quality)
-    best_transcript = None
-    outputs = result.get("outputs", {})
-
-    # Priority 1: GovInfo official transcript
-    govinfo = outputs.get("govinfo_transcript")
-    if govinfo:
-        best_transcript = Path(govinfo)
-
-    # Priority 2: C-SPAN cleaned, then raw
-    if best_transcript is None:
-        cspan_cleaned = outputs.get("cspan_cleaned")
-        if cspan_cleaned:
-            best_transcript = Path(cspan_cleaned)
-        else:
-            cspan_raw = outputs.get("cspan_transcript")
-            if cspan_raw:
-                best_transcript = Path(cspan_raw)
-
-    # Priority 3: ISVP cleaned, then raw
-    if best_transcript is None:
-        isvp_cleaned = outputs.get("isvp_cleaned")
-        if isvp_cleaned:
-            best_transcript = Path(isvp_cleaned)
-        else:
-            isvp_raw = outputs.get("isvp_transcript")
-            if isvp_raw:
-                best_transcript = Path(isvp_raw)
-
-    # Priority 4: YouTube cleaned or raw captions
-    if best_transcript is None:
-        audio = outputs.get("audio", {})
-        if isinstance(audio, dict):
-            if audio.get("cleaned_transcript"):
-                best_transcript = Path(audio["cleaned_transcript"])
-            elif audio.get("captions"):
-                best_transcript = Path(audio["captions"])
+    # Select best transcript by priority (highest quality first)
+    best_transcript = _select_best_transcript(result.get("outputs", {}))
 
     # Copy best transcript
-    if best_transcript and best_transcript.exists():
+    if best_transcript and best_transcript.exists() and best_transcript.stat().st_size > 0:
         shutil.copy2(best_transcript, transcript_dir / "transcript.txt")
 
     # Copy testimony files
