@@ -13,7 +13,7 @@ import os
 import re
 import tempfile
 import time as _time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
 
@@ -27,6 +27,9 @@ log = logging.getLogger(__name__)
 # Thread-safe rate limiter for C-SPAN requests (WAF is aggressive)
 _rate_limiter = RateLimiter(min_delay=4.0)
 
+# Separate from utils.USER_AGENT: C-SPAN's WAF fingerprints request headers
+# and blocks the generic bot-like UA.  This mimics a real Chrome browser to
+# avoid captcha challenges on search pages and transcript API calls.
 _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -157,7 +160,7 @@ def discover_cspan_targeted(
                  len(to_search), max_searches)
         to_search = to_search[:max_searches]
 
-    cutoff = datetime.now() - timedelta(days=30)  # generous for title matching
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)  # generous for title matching
     results: list[dict] = []
     searches_done = 0
     waf_blocked = False
@@ -255,7 +258,7 @@ def discover_cspan_rotation(
         log.warning("playwright not installed, skipping C-SPAN rotation")
         return []
 
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
     all_results: list[dict] = []
     seen_ids: set[str] = set()
@@ -412,7 +415,7 @@ def discover_cspan_by_committee(
         log.warning("playwright not installed, skipping C-SPAN by-committee search")
         return []
 
-    cutoff = datetime.now() - timedelta(days=30)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     all_results: list[dict] = []
     seen_ids: set[str] = set()
     searches_done = 0

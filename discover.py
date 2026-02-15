@@ -176,7 +176,7 @@ def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hear
     if not channels:
         return []
 
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     cutoff_str = cutoff.strftime("%Y%m%d")
 
     # Build list of tabs to scan across all channels.
@@ -382,7 +382,7 @@ def discover_cspan_youtube(hearings: list[Hearing], days: int = 7) -> int:
 
     Returns the number of hearings matched.
     """
-    cutoff_str = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+    cutoff_str = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y%m%d")
 
     try:
         result = subprocess.run(
@@ -480,7 +480,7 @@ def discover_website(committee_key: str, meta: dict, days: int = 1) -> list[Hear
     """Scrape a committee's hearings page using the appropriate scraper."""
     hearings_url = meta.get("hearings_url")
     scraper_type = meta.get("scraper_type", "youtube_only")
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
     # JS-rendered committees: use the Chrome browser via CDP
     if meta.get("requires_js", False) and hearings_url:
@@ -691,7 +691,7 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
         log.warning("No committee codes configured, skipping congress.gov API")
         return []
 
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     from_dt = cutoff.strftime("%Y-%m-%dT00:00:00Z")
 
     hearings: list[Hearing] = []
@@ -782,7 +782,7 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
             if meeting_date < cutoff:
                 return None
             # Skip future placeholder entries (date > 30 days out)
-            if meeting_date > datetime.now() + timedelta(days=30):
+            if meeting_date > datetime.now(timezone.utc) + timedelta(days=30):
                 return None
         except (ValueError, IndexError):
             return None
@@ -856,7 +856,7 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
 
     fetch_details = os.environ.get("GOVINFO_FETCH_DETAILS", "false").lower() == "true"
 
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
     url = (
         f"https://api.govinfo.gov/collections/CHRG/{cutoff}"
         f"?offsetMark=*&pageSize=100&congress={config.CONGRESS}"
@@ -877,7 +877,7 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
     # *published* since cutoff.  Filter by dateIssued to drop old transcripts
     # that merely got a metadata update.  Tie to the lookback window (min 30
     # days) so stale transcripts don't pollute coverage stats.
-    date_floor = (datetime.now() - timedelta(days=max(days, 30))).strftime("%Y-%m-%d")
+    date_floor = (datetime.now(timezone.utc) - timedelta(days=max(days, 30))).strftime("%Y-%m-%d")
 
     hearings = []
     for pkg in data.get("packages", []):
@@ -1000,7 +1000,7 @@ def _attach_isvp_params(hearings: list[Hearing], committees: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
-                  state=None) -> list[Hearing]:
+                  state=None, skip_cspan: bool = False) -> list[Hearing]:
     """Run all discovery methods across committees. Parallelized."""
     if committees is None:
         committees = config.get_committees()
@@ -1081,69 +1081,70 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
     # C-SPAN discovery: 4-step strategy
     #   DDG → sponsor ID by committee → targeted title → weekly rotation
     # Only search for past hearings — future ones can't have video yet.
-    today = datetime.now().strftime("%Y-%m-%d")
+    if not skip_cspan:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    try:
-        import cspan
+        try:
+            import cspan
 
-        # Step 1: DuckDuckGo-based C-SPAN lookup (free, zero WAF cost)
-        unmatched = [h for h in deduped
-                     if "cspan_url" not in h.sources and h.date <= today]
-        if unmatched:
-            google_results = cspan.discover_cspan_google(
-                [{"id": h.id, "title": h.title, "date": h.date,
-                  "committee_key": h.committee_key,
-                  "committee_name": h.committee_name}
-                 for h in unmatched]
-            )
-            by_id = {h.id: h for h in deduped}
-            for r in google_results:
-                h = by_id.get(r["hearing_id"])
-                if h:
-                    h.sources["cspan_url"] = r["cspan_url"]
-
-        # Step 2: Sponsor ID search for committees with unmatched hearings (WAF-limited)
-        still_unmatched = [h for h in deduped
-                          if "cspan_url" not in h.sources and h.date <= today]
-        if still_unmatched:
-            # Identify unique committees that still need searching
-            unmatched_keys = list(dict.fromkeys(
-                h.committee_key for h in still_unmatched
-            ))
-            if unmatched_keys:
-                sponsor_results = cspan.discover_cspan_by_committee(
-                    unmatched_keys, committees, state=state, max_searches=6,
+            # Step 1: DuckDuckGo-based C-SPAN lookup (free, zero WAF cost)
+            unmatched = [h for h in deduped
+                         if "cspan_url" not in h.sources and h.date <= today]
+            if unmatched:
+                google_results = cspan.discover_cspan_google(
+                    [{"id": h.id, "title": h.title, "date": h.date,
+                      "committee_key": h.committee_key,
+                      "committee_name": h.committee_name}
+                     for h in unmatched]
                 )
-                if sponsor_results:
-                    _attach_cspan_urls(deduped, sponsor_results)
+                by_id = {h.id: h for h in deduped}
+                for r in google_results:
+                    h = by_id.get(r["hearing_id"])
+                    if h:
+                        h.sources["cspan_url"] = r["cspan_url"]
 
-        # Step 3: Title-based C-SPAN search (WAF-limited, fallback)
-        still_unmatched = [h for h in deduped
-                          if "cspan_url" not in h.sources and h.date <= today]
-        if still_unmatched:
-            targeted_results = cspan.discover_cspan_targeted(
-                [{"id": h.id, "title": h.title, "date": h.date,
-                  "committee_key": h.committee_key,
-                  "committee_name": h.committee_name}
-                 for h in still_unmatched],
-                state=state,
-                max_searches=4,
-            )
-            if targeted_results:
-                _attach_cspan_urls(deduped, targeted_results)
+            # Step 2: Sponsor ID search for committees with unmatched hearings (WAF-limited)
+            still_unmatched = [h for h in deduped
+                              if "cspan_url" not in h.sources and h.date <= today]
+            if still_unmatched:
+                # Identify unique committees that still need searching
+                unmatched_keys = list(dict.fromkeys(
+                    h.committee_key for h in still_unmatched
+                ))
+                if unmatched_keys:
+                    sponsor_results = cspan.discover_cspan_by_committee(
+                        unmatched_keys, committees, state=state, max_searches=6,
+                    )
+                    if sponsor_results:
+                        _attach_cspan_urls(deduped, sponsor_results)
 
-        # Step 4: Weekly committee rotation (background, low priority)
-        if state and _should_rotate(state):
-            rotation_results = cspan.discover_cspan_rotation(
-                committees, days=max(days, 7), state=state,
-            )
-            if rotation_results:
-                _attach_cspan_urls(deduped, rotation_results)
+            # Step 3: Title-based C-SPAN search (WAF-limited, fallback)
+            still_unmatched = [h for h in deduped
+                              if "cspan_url" not in h.sources and h.date <= today]
+            if still_unmatched:
+                targeted_results = cspan.discover_cspan_targeted(
+                    [{"id": h.id, "title": h.title, "date": h.date,
+                      "committee_key": h.committee_key,
+                      "committee_name": h.committee_name}
+                     for h in still_unmatched],
+                    state=state,
+                    max_searches=4,
+                )
+                if targeted_results:
+                    _attach_cspan_urls(deduped, targeted_results)
 
-    except ImportError:
-        log.debug("cspan module not available, skipping C-SPAN discovery")
-    except (httpx.HTTPError, OSError, ValueError, TimeoutError) as e:
-        log.warning("C-SPAN discovery failed: %s", e)
+            # Step 4: Weekly committee rotation (background, low priority)
+            if state and _should_rotate(state):
+                rotation_results = cspan.discover_cspan_rotation(
+                    committees, days=max(days, 7), state=state,
+                )
+                if rotation_results:
+                    _attach_cspan_urls(deduped, rotation_results)
+
+        except ImportError:
+            log.debug("cspan module not available, skipping C-SPAN discovery")
+        except (httpx.HTTPError, OSError, ValueError, TimeoutError) as e:
+            log.warning("C-SPAN discovery failed: %s", e)
 
     # Deterministic ISVP params for Senate hearings (before detail scraping,
     # so iframe-extracted params from the detail scraper can override)

@@ -1,5 +1,6 @@
 """Tests for JS-rendered page scraping via Chrome CDP."""
 
+import pytest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -150,8 +151,8 @@ class TestScrapeJsRenderedBrowserUnavailable:
             )
             assert results == []
 
-    def test_returns_empty_when_browser_not_running(self):
-        """If CDP connection fails, should log warning and return []."""
+    def test_raises_when_browser_not_running(self):
+        """If CDP connection fails, should raise RuntimeError."""
         mock_pw = MagicMock()
         mock_pw.chromium.connect_over_cdp.side_effect = ConnectionError(
             "Connection refused"
@@ -162,13 +163,13 @@ class TestScrapeJsRenderedBrowserUnavailable:
         mock_sync_pw_callable.return_value.start.return_value = mock_pw
 
         with patch("playwright.sync_api.sync_playwright", mock_sync_pw_callable):
-            results = scrape_js_rendered(
-                "https://energycommerce.house.gov/calendars",
-                "generic_links",
-                "https://energycommerce.house.gov",
-                datetime(2026, 1, 1),
-            )
-            assert results == []
+            with pytest.raises(RuntimeError, match="browser connection failed"):
+                scrape_js_rendered(
+                    "https://energycommerce.house.gov/calendars",
+                    "generic_links",
+                    "https://energycommerce.house.gov",
+                    datetime(2026, 1, 1),
+                )
 
 
 # ---------------------------------------------------------------------------

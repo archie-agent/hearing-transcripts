@@ -32,20 +32,12 @@ def main():
     args = parser.parse_args()
 
     skip_cspan = args.skip_cspan and not args.with_cspan
-    if skip_cspan:
-        import cspan as _cspan_mod
-        _noop = lambda *a, **kw: []
-        _cspan_mod.discover_cspan_google = _noop
-        _cspan_mod.discover_cspan_by_committee = _noop
-        _cspan_mod.discover_cspan_targeted = _noop
-        _cspan_mod.discover_cspan_rotation = _noop
-
     days = args.days
     state = State()
     active = config.get_committees()
 
     log.info("Running fast discovery (YouTube + websites + congress.gov), %d days, %d committees", days, len(active))
-    hearings = discover_all(days=days, committees=active, state=state)
+    hearings = discover_all(days=days, committees=active, state=state, skip_cspan=skip_cspan)
     log.info("Discovered %d hearings", len(hearings))
 
     # Filter to past hearings only (today or earlier)

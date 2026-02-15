@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, NamedTuple
 from bs4 import BeautifulSoup, Tag
 
@@ -81,8 +81,8 @@ def _is_plausible_hearing_date(date_str: str) -> bool:
     expirations like 'January 19, 2031') rather than actual hearing dates.
     """
     try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        now = datetime.now()
+        dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
         # Hearing can't be more than 2 years old or more than 6 months in the future
         return (now - timedelta(days=730)) <= dt <= (now + timedelta(days=180))
     except ValueError:
@@ -95,6 +95,9 @@ def _is_recent(date_str: str, cutoff: datetime) -> bool:
         return False
     try:
         dt = datetime.strptime(date_str, "%Y-%m-%d")
+        # Match cutoff's timezone awareness for comparison
+        if cutoff.tzinfo is not None:
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt >= cutoff
     except ValueError:
         return False
@@ -769,7 +772,7 @@ def scrape_js_rendered(
     to hearings_url, waits for JS to render, then passes the rendered HTML
     to the appropriate scraper function.
 
-    Falls back gracefully (returns []) if the browser is not running.
+    Raises RuntimeError if the browser is not running or connection fails.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -792,8 +795,9 @@ def scrape_js_rendered(
         html = page.content()
 
     except (TimeoutError, OSError, ConnectionError) as e:
-        log.warning("JS scraper: browser connection failed for %s: %s", hearings_url, e)
-        return []
+        raise RuntimeError(
+            f"JS scraper: browser connection failed for {hearings_url}: {e}"
+        ) from e
     finally:
         if page:
             try:

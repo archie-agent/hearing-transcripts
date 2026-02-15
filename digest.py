@@ -297,9 +297,6 @@ def compose_digest(quotes: list[Quote], api_key: str) -> tuple[str, float]:
             usage.get("completion_tokens", 0),
         )
         body = response["choices"][0]["message"]["content"]
-    except httpx.HTTPError as e:
-        log.warning("Transient HTTP error composing digest: %s", e)
-        return "", 0.0
     except (KeyError, IndexError) as e:
         raise ValueError(f"Unexpected API response shape in compose_digest: {e}") from e
 
@@ -342,8 +339,7 @@ def polish_digest(body: str, api_key: str) -> tuple[str, float]:
         log.warning("Polish step failed (transient HTTP error), using unpolished version: %s", e)
         return body, cost
     except (KeyError, IndexError) as e:
-        log.warning("Polish step got unexpected response shape, using unpolished version: %s", e)
-        return body, cost
+        raise ValueError(f"Unexpected API response shape in polish_digest: {e}") from e
 
     log.info("Polished digest (%d chars, $%.4f)", len(polished), cost)
     return polished, cost

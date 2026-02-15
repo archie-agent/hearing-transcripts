@@ -58,7 +58,7 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
         return text
     except ImportError:
         log.warning("pymupdf4llm not installed, falling back to pymupdf")
-    except Exception as e:
+    except (RuntimeError, ValueError, TypeError) as e:
         log.warning("pymupdf4llm extraction failed: %s, falling back to pymupdf", e)
 
     # Fallback to basic pymupdf
