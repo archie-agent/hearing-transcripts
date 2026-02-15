@@ -118,8 +118,7 @@ def calculate_cost(
         Cost in USD
     """
     if model not in config.MODEL_PRICING:
-        logger.warning(f"Unknown model {model}, cannot calculate cost")
-        return 0.0
+        raise ValueError(f"Unknown model {model!r}, cannot calculate cost")
 
     input_price, output_price = config.MODEL_PRICING[model]
 

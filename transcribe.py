@@ -155,6 +155,8 @@ def transcribe_audio(audio_path: Path) -> str | None:
 
 def _transcribe_single(client, audio_path: Path) -> str | None:
     """Transcribe a single audio file via OpenAI."""
+    import openai
+
     try:
         try:
             result = client.audio.transcriptions.create(
@@ -174,14 +176,14 @@ def _transcribe_single(client, audio_path: Path) -> str | None:
                         lines.append(text)
                 return "\n".join(lines)
             return result.text
-        except Exception as e:
+        except openai.APIError as e:
             log.info("%s failed (%s), falling back to whisper-1", config.TRANSCRIPTION_MODEL, e)
             result = client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_path,
             )
             return result.text
-    except Exception as e:
+    except openai.APIError as e:
         log.error("Transcription failed: %s", e)
         return None
 

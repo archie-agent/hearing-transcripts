@@ -517,7 +517,12 @@ def deliver_digest(
         return False
 
     try:
-        from agentmail import AgentMail
+        from agentmail import (
+            AgentMail,
+            MessageRejectedError,
+            NotFoundError,
+            ValidationError,
+        )
 
         client = AgentMail(api_key=api_key)
     except ImportError:
@@ -537,8 +542,14 @@ def deliver_digest(
         )
         logger.info("Digest sent to %s", config.DIGEST_RECIPIENT)
         return True
-    except Exception:
-        logger.exception("Failed to send digest email")
+    except (
+        MessageRejectedError,
+        NotFoundError,
+        ValidationError,
+        httpx.HTTPError,
+        OSError,
+    ) as e:
+        logger.error("Failed to send digest email: %s", e)
         return False
 
 
