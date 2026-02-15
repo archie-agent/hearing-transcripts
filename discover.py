@@ -8,13 +8,11 @@ import logging
 import os
 import re
 import subprocess
-import sys
 import threading
 import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -22,36 +20,18 @@ import httpx
 import config
 import scrapers
 from detail_scraper import scrape_hearing_detail
-from utils import TITLE_STOPWORDS
+from utils import TITLE_STOPWORDS, RateLimiter, YT_DLP_ENV
 
 log = logging.getLogger(__name__)
 
-# yt-dlp needs deno on PATH for JS challenge solving, and the venv bin for yt-dlp itself
-_VENV_BIN = str(Path(__file__).parent / ".venv" / "bin")
-_SYS_BIN = str(Path(sys.executable).parent)
-_DENO_DIR = os.path.expanduser("~/.deno/bin")
-_YT_DLP_ENV = {**os.environ, "PATH": f"{_VENV_BIN}:{_SYS_BIN}:{_DENO_DIR}:{os.environ.get('PATH', '')}"}
-
-# Rate limiting: track last request time per domain
-_last_request: dict[str, float] = {}
-_MIN_DELAY = 1.5  # seconds between requests to same domain (DEMO_KEY: 40 req/min)
+# Thread-safe rate limiter shared across all discovery HTTP calls
+_rate_limiter = RateLimiter(min_delay=1.5)
 
 # Serialize yt-dlp calls across threads.  YouTube silently returns empty
 # results when hit with many concurrent requests — a single lock ensures
 # only one committee scans at a time while website scraping continues in
 # parallel via the thread pool.
 _yt_dlp_lock = threading.Lock()
-
-
-def _rate_limit(url: str) -> None:
-    """Sleep if needed to respect minimum delay between requests to same domain."""
-    domain = urlparse(url).netloc
-    now = _time.monotonic()
-    last = _last_request.get(domain, 0)
-    wait = _MIN_DELAY - (now - last)
-    if wait > 0:
-        _time.sleep(wait)
-    _last_request[domain] = _time.monotonic()
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +102,7 @@ def _normalize_title(title: str) -> str:
 
 def _http_get(url: str, timeout: float = 20.0) -> httpx.Response | None:
     """Fetch a URL with retries, rate limiting, and 429 backoff. Returns None on failure."""
-    _rate_limit(url)
+    _rate_limiter.wait(urlparse(url).netloc)
     transport = httpx.HTTPTransport(retries=2)
     try:
         with httpx.Client(transport=transport, timeout=timeout,
@@ -248,7 +228,7 @@ def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hear
                     capture_output=True,
                     text=True,
                     timeout=120,
-                    env=_YT_DLP_ENV,
+                    env=YT_DLP_ENV,
                 )
                 all_stdout += result.stdout
                 if result.returncode != 0 and not result.stdout.strip():
@@ -298,13 +278,14 @@ def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hear
         # Filter committee clips by title patterns (regardless of duration)
         title_lower = title.lower()
         if any(pat in title_lower for pat in _COMMITTEE_YT_SKIP):
-            _youtube_clips.append({
-                "committee_key": committee_key,
-                "date": date_formatted,
-                "title": title,
-                "duration": duration,
-                **yt_source,
-            })
+            with _youtube_clips_lock:
+                _youtube_clips.append({
+                    "committee_key": committee_key,
+                    "date": date_formatted,
+                    "title": title,
+                    "duration": duration,
+                    **yt_source,
+                })
             log.debug("YouTube clip filtered by title: %s", title[:80])
             continue
 
@@ -322,13 +303,14 @@ def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hear
             log.debug("  YouTube hearing: %s (%s) %s", vid_id, dur_str, title[:60])
         else:
             # Short clip — stash for later matching with website hearings
-            _youtube_clips.append({
-                "committee_key": committee_key,
-                "date": date_formatted,
-                "title": title,
-                "duration": duration,
-                **yt_source,
-            })
+            with _youtube_clips_lock:
+                _youtube_clips.append({
+                    "committee_key": committee_key,
+                    "date": date_formatted,
+                    "title": title,
+                    "duration": duration,
+                    **yt_source,
+                })
             dur_str = f"{duration // 60}m{duration % 60:02d}s"
             log.debug("  YouTube clip (skipped): %s (%s) %s", vid_id, dur_str, title[:60])
 
@@ -338,6 +320,7 @@ def discover_youtube(committee_key: str, meta: dict, days: int = 1) -> list[Hear
 # Clips shorter than _MIN_HEARING_DURATION, stashed during YouTube discovery
 # for later matching with website hearings in _attach_youtube_clips().
 _youtube_clips: list[dict] = []
+_youtube_clips_lock = threading.Lock()
 
 
 def _attach_youtube_clips(hearings: list[Hearing]) -> None:
@@ -438,7 +421,7 @@ def discover_cspan_youtube(hearings: list[Hearing], days: int = 7) -> int:
             capture_output=True,
             text=True,
             timeout=180,
-            env=_YT_DLP_ENV,
+            env=YT_DLP_ENV,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         log.warning("C-SPAN YouTube scan failed: %s", e)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import sys
 import time
 from threading import Lock
 
@@ -22,10 +23,11 @@ TITLE_STOPWORDS = frozenset({
 })
 
 
-# yt-dlp environment setup — include venv bin so yt-dlp is found
+# yt-dlp environment setup — include venv bin, sys executable dir, and deno
 _VENV_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin")
+_SYS_BIN = os.path.dirname(os.path.abspath(sys.executable)) if hasattr(sys, "executable") and sys.executable else ""
 DENO_DIR = os.path.expanduser("~/.deno/bin")
-YT_DLP_ENV = {**os.environ, "PATH": f"{_VENV_BIN}:{DENO_DIR}:{os.environ.get('PATH', '')}"}
+YT_DLP_ENV = {**os.environ, "PATH": f"{_VENV_BIN}:{_SYS_BIN}:{DENO_DIR}:{os.environ.get('PATH', '')}"}
 
 
 def get_http_client(retries: int = 3, timeout: float = 20.0) -> httpx.Client:

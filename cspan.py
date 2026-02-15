@@ -18,13 +18,12 @@ from urllib.parse import quote_plus
 import httpx
 
 import config
-from utils import TITLE_STOPWORDS
+from utils import TITLE_STOPWORDS, RateLimiter
 
 log = logging.getLogger(__name__)
 
-# Rate limiting between C-SPAN requests
-_last_request: dict[str, float] = {}
-_MIN_DELAY = 4.0  # be polite to C-SPAN — WAF is aggressive
+# Thread-safe rate limiter for C-SPAN requests (WAF is aggressive)
+_rate_limiter = RateLimiter(min_delay=4.0)
 
 _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -34,12 +33,7 @@ _UA = (
 
 
 def _rate_limit(domain: str = "www.c-span.org") -> None:
-    now = _time.monotonic()
-    last = _last_request.get(domain, 0)
-    wait = _MIN_DELAY - (now - last)
-    if wait > 0:
-        _time.sleep(wait)
-    _last_request[domain] = _time.monotonic()
+    _rate_limiter.wait(domain)
 
 
 # ---------------------------------------------------------------------------
