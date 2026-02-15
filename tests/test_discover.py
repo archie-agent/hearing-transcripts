@@ -1,9 +1,16 @@
 """Tests for discover.py — dedup logic and Hearing dataclass."""
 
+import threading
+
+import discover
 from discover import (
     Hearing,
+    _attach_youtube_clips,
+    _chamber_from_package_id,
     _cross_committee_dedup,
     _deduplicate,
+    _is_markup_or_procedural,
+    _keyword_overlap,
     _merge_adjacent_date_pairs,
     title_similarity,
 )
@@ -360,3 +367,211 @@ class TestSourceAuthority:
         """Hearing with no explicit source_authority should default to 0."""
         h = Hearing("house.judiciary", "Judiciary", "Title", "2026-02-10")
         assert h.source_authority == 0
+
+
+class TestChamberFromPackageId:
+    def test_house_package(self):
+        assert _chamber_from_package_id("CHRG-119hhrg12345") == "house"
+
+    def test_senate_package(self):
+        assert _chamber_from_package_id("CHRG-119shrg99999") == "senate"
+
+    def test_joint_resolution_unknown(self):
+        assert _chamber_from_package_id("CHRG-119jres12345") == "unknown"
+
+    def test_case_insensitive(self):
+        assert _chamber_from_package_id("chrg-119HHRG12345") == "house"
+
+    def test_case_insensitive_senate(self):
+        assert _chamber_from_package_id("chrg-119SHRG55555") == "senate"
+
+
+class TestIsMarkupOrProcedural:
+    def test_markup_of(self):
+        assert _is_markup_or_procedural("Markup of H.R. 1234") is True
+
+    def test_full_committee_markup(self):
+        assert _is_markup_or_procedural("Full Committee Markup: Defense Bill") is True
+
+    def test_business_meeting(self):
+        assert _is_markup_or_procedural("Business Meeting") is True
+
+    def test_organizational_meeting(self):
+        assert _is_markup_or_procedural("Organizational Meeting") is True
+
+    def test_hearing_on_topic(self):
+        assert _is_markup_or_procedural("Hearing on AI Regulation") is False
+
+    def test_policy_title(self):
+        assert _is_markup_or_procedural("Federal Reserve Monetary Policy") is False
+
+    def test_mark_up_of_variant(self):
+        assert _is_markup_or_procedural("Mark Up of Some Bill") is True
+
+    def test_member_day(self):
+        assert _is_markup_or_procedural("Member Day") is True
+
+    def test_case_insensitive(self):
+        assert _is_markup_or_procedural("BUSINESS MEETING") is True
+
+    def test_empty_string(self):
+        assert _is_markup_or_procedural("") is False
+
+
+class TestKeywordOverlap:
+    def test_overlapping_titles(self):
+        count = _keyword_overlap(
+            "Federal Reserve Monetary Policy Report",
+            "Monetary Policy Report to Congress",
+        )
+        # "monetary", "policy", "report" should overlap (all >= 3 chars, not stopwords)
+        assert count >= 2
+
+    def test_completely_different_titles(self):
+        count = _keyword_overlap(
+            "Artificial Intelligence Regulation",
+            "Border Security Immigration Enforcement",
+        )
+        assert count == 0
+
+    def test_empty_titles(self):
+        assert _keyword_overlap("", "some title") == 0
+        assert _keyword_overlap("some title", "") == 0
+        assert _keyword_overlap("", "") == 0
+
+    def test_stopwords_excluded(self):
+        # "the", "and", "of" are stopwords; "hearing" and "committee" are also stopwords
+        count = _keyword_overlap(
+            "the hearing of the committee",
+            "the hearing and the committee",
+        )
+        assert count == 0
+
+    def test_short_words_excluded(self):
+        # Words shorter than 3 chars should be excluded
+        count = _keyword_overlap("AI is on", "AI is on")
+        assert count == 0
+
+    def test_significant_words_counted(self):
+        # "federal", "reserve" are significant (>= 3 chars, not stopwords)
+        count = _keyword_overlap("Federal Reserve", "Federal Reserve")
+        assert count == 2
+
+
+class TestAttachYoutubeClips:
+    def test_clip_matched_to_hearing(self, monkeypatch):
+        """A clip with matching committee, date, and similar title gets attached."""
+        clip = {
+            "committee_key": "house.judiciary",
+            "date": "2026-02-10",
+            "title": "AI Regulation Hearing Discussion",
+            "youtube_url": "https://youtube.com/watch?v=clip1",
+            "youtube_id": "clip1",
+            "duration": 300,
+        }
+        monkeypatch.setattr(discover, "_youtube_clips", [clip])
+        monkeypatch.setattr(discover, "_youtube_clips_lock", threading.Lock())
+
+        h = Hearing(
+            "house.judiciary", "Judiciary",
+            "AI Regulation Hearing", "2026-02-10",
+            sources={"website_url": "https://example.com"},
+        )
+        _attach_youtube_clips([h])
+
+        assert "youtube_url" in h.sources
+        assert h.sources["youtube_url"] == "https://youtube.com/watch?v=clip1"
+        assert "youtube_clips" in h.sources
+        assert len(h.sources["youtube_clips"]) == 1
+        # _youtube_clips should be cleared after call
+        assert discover._youtube_clips == []
+
+    def test_clip_non_matching_committee(self, monkeypatch):
+        """A clip with a different committee should NOT be attached."""
+        clip = {
+            "committee_key": "senate.judiciary",
+            "date": "2026-02-10",
+            "title": "AI Regulation Hearing Discussion",
+            "youtube_url": "https://youtube.com/watch?v=clip2",
+            "youtube_id": "clip2",
+            "duration": 300,
+        }
+        monkeypatch.setattr(discover, "_youtube_clips", [clip])
+        monkeypatch.setattr(discover, "_youtube_clips_lock", threading.Lock())
+
+        h = Hearing(
+            "house.judiciary", "Judiciary",
+            "AI Regulation Hearing", "2026-02-10",
+            sources={"website_url": "https://example.com"},
+        )
+        _attach_youtube_clips([h])
+
+        assert "youtube_url" not in h.sources
+        assert "youtube_clips" not in h.sources
+
+    def test_clip_non_matching_date(self, monkeypatch):
+        """A clip with a different date should NOT be attached."""
+        clip = {
+            "committee_key": "house.judiciary",
+            "date": "2026-02-15",
+            "title": "AI Regulation Hearing Discussion",
+            "youtube_url": "https://youtube.com/watch?v=clip3",
+            "youtube_id": "clip3",
+            "duration": 300,
+        }
+        monkeypatch.setattr(discover, "_youtube_clips", [clip])
+        monkeypatch.setattr(discover, "_youtube_clips_lock", threading.Lock())
+
+        h = Hearing(
+            "house.judiciary", "Judiciary",
+            "AI Regulation Hearing", "2026-02-10",
+            sources={"website_url": "https://example.com"},
+        )
+        _attach_youtube_clips([h])
+
+        assert "youtube_url" not in h.sources
+
+    def test_does_not_overwrite_existing_youtube_url(self, monkeypatch):
+        """If hearing already has a youtube_url, clip should not overwrite it
+        but should still be added to youtube_clips list."""
+        clip = {
+            "committee_key": "house.judiciary",
+            "date": "2026-02-10",
+            "title": "AI Regulation Hearing Discussion",
+            "youtube_url": "https://youtube.com/watch?v=clip4",
+            "youtube_id": "clip4",
+            "duration": 300,
+        }
+        monkeypatch.setattr(discover, "_youtube_clips", [clip])
+        monkeypatch.setattr(discover, "_youtube_clips_lock", threading.Lock())
+
+        h = Hearing(
+            "house.judiciary", "Judiciary",
+            "AI Regulation Hearing", "2026-02-10",
+            sources={
+                "website_url": "https://example.com",
+                "youtube_url": "https://youtube.com/watch?v=original",
+            },
+        )
+        _attach_youtube_clips([h])
+
+        # Original youtube_url preserved
+        assert h.sources["youtube_url"] == "https://youtube.com/watch?v=original"
+        # Clip still recorded in youtube_clips list
+        assert "youtube_clips" in h.sources
+        assert h.sources["youtube_clips"][0]["url"] == "https://youtube.com/watch?v=clip4"
+
+    def test_empty_clips_list_is_noop(self, monkeypatch):
+        """When _youtube_clips is empty, function should return early."""
+        monkeypatch.setattr(discover, "_youtube_clips", [])
+        monkeypatch.setattr(discover, "_youtube_clips_lock", threading.Lock())
+
+        h = Hearing(
+            "house.judiciary", "Judiciary",
+            "AI Regulation Hearing", "2026-02-10",
+            sources={"website_url": "https://example.com"},
+        )
+        _attach_youtube_clips([h])
+
+        assert "youtube_url" not in h.sources
+        assert "youtube_clips" not in h.sources
