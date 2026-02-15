@@ -313,55 +313,58 @@ def _attach_youtube_clips(hearings: list[Hearing]) -> None:
     YouTube clips (chairman statements, member interviews, etc.), we attach the
     clip URLs as supplementary metadata on the matching website hearing rather
     than treating the clips as standalone hearings.
+
+    Holds _youtube_clips_lock for the entire read-match-clear cycle to prevent
+    concurrent discover_youtube() calls from appending while we iterate.
     """
-    if not _youtube_clips:
-        return
-
-    attached = 0
-    for clip in _youtube_clips:
-        best_match: Hearing | None = None
-        best_sim = 0.0
-
-        for h in hearings:
-            # Must be same committee
-            if h.committee_key != clip["committee_key"]:
-                continue
-            # Must be same date (or within 1 day to handle upload-date drift)
-            if h.date != clip["date"]:
-                continue
-            sim = title_similarity(h.title, clip["title"])
-            if sim > best_sim:
-                best_sim = sim
-                best_match = h
-
-        # Require a minimum similarity — clips often have very different titles
-        # ("Chairman's Opening Statement") so we use a lower bar than cross-dedup
-        if best_match and best_sim >= 0.15:
-            # Don't overwrite a real hearing YouTube URL with a clip
-            if "youtube_url" not in best_match.sources:
-                best_match.sources["youtube_url"] = clip["youtube_url"]
-                best_match.sources["youtube_id"] = clip["youtube_id"]
-                best_match.sources["youtube_duration"] = clip["duration"]
-            # Also store clips list for reference
-            clips_list = best_match.sources.setdefault("youtube_clips", [])
-            clips_list.append({
-                "url": clip["youtube_url"],
-                "title": clip["title"],
-                "duration": clip["duration"],
-            })
-            attached += 1
-            log.debug("  Clip matched: %s -> %s (sim=%.2f)",
-                      clip["title"][:40], best_match.title[:40], best_sim)
-
-    if attached:
-        log.info("Attached %d YouTube clips to %s hearing(s)",
-                 attached, len({id(h) for h in hearings
-                                if "youtube_clips" in h.sources}))
-    unmatched = len(_youtube_clips) - attached
-    if unmatched:
-        log.debug("  %d YouTube clips unmatched (no website hearing found)", unmatched)
-
     with _youtube_clips_lock:
+        if not _youtube_clips:
+            return
+
+        attached = 0
+        for clip in _youtube_clips:
+            best_match: Hearing | None = None
+            best_sim = 0.0
+
+            for h in hearings:
+                # Must be same committee
+                if h.committee_key != clip["committee_key"]:
+                    continue
+                # Must be same date (or within 1 day to handle upload-date drift)
+                if h.date != clip["date"]:
+                    continue
+                sim = title_similarity(h.title, clip["title"])
+                if sim > best_sim:
+                    best_sim = sim
+                    best_match = h
+
+            # Require a minimum similarity — clips often have very different titles
+            # ("Chairman's Opening Statement") so we use a lower bar than cross-dedup
+            if best_match and best_sim >= 0.15:
+                # Don't overwrite a real hearing YouTube URL with a clip
+                if "youtube_url" not in best_match.sources:
+                    best_match.sources["youtube_url"] = clip["youtube_url"]
+                    best_match.sources["youtube_id"] = clip["youtube_id"]
+                    best_match.sources["youtube_duration"] = clip["duration"]
+                # Also store clips list for reference
+                clips_list = best_match.sources.setdefault("youtube_clips", [])
+                clips_list.append({
+                    "url": clip["youtube_url"],
+                    "title": clip["title"],
+                    "duration": clip["duration"],
+                })
+                attached += 1
+                log.debug("  Clip matched: %s -> %s (sim=%.2f)",
+                          clip["title"][:40], best_match.title[:40], best_sim)
+
+        if attached:
+            log.info("Attached %d YouTube clips to %s hearing(s)",
+                     attached, len({id(h) for h in hearings
+                                    if "youtube_clips" in h.sources}))
+        unmatched = len(_youtube_clips) - attached
+        if unmatched:
+            log.debug("  %d YouTube clips unmatched (no website hearing found)", unmatched)
+
         _youtube_clips.clear()
 
 
@@ -554,10 +557,12 @@ _GOVINFO_CODE_MAP: dict[str, str] = {}
 # house.judiciary and senate.judiciary), so values are lists.
 _GOVINFO_NAME_MAP: dict[str, list[str]] = {}
 _GOVINFO_SORTED_FRAGMENTS: list[str] = []
+_govinfo_maps_built = False
+
 
 def _build_govinfo_map() -> None:
     """Build mapping from GovInfo package codes and name fragments to committee keys."""
-    global _GOVINFO_CODE_MAP, _GOVINFO_NAME_MAP, _GOVINFO_SORTED_FRAGMENTS
+    global _GOVINFO_CODE_MAP, _GOVINFO_NAME_MAP, _GOVINFO_SORTED_FRAGMENTS, _govinfo_maps_built
     _GOVINFO_CODE_MAP.clear()
     _GOVINFO_NAME_MAP.clear()
     for key, meta in config.get_all_committees().items():
@@ -583,9 +588,13 @@ def _build_govinfo_map() -> None:
                 _GOVINFO_NAME_MAP.setdefault(fragment, []).append(key)
 
     _GOVINFO_SORTED_FRAGMENTS = sorted(_GOVINFO_NAME_MAP.keys(), key=len, reverse=True)
+    _govinfo_maps_built = True
 
-# Build at import time — committee data is always available
-_build_govinfo_map()
+
+def _ensure_govinfo_maps() -> None:
+    """Build govinfo maps on first use (lazy initialization)."""
+    if not _govinfo_maps_built:
+        _build_govinfo_map()
 
 
 def _map_govinfo_to_committee(title: str, chamber: str) -> str | None:
@@ -599,6 +608,7 @@ def _map_govinfo_to_committee(title: str, chamber: str) -> str | None:
 
     Returns the committee_key if a match is found, None otherwise.
     """
+    _ensure_govinfo_maps()
     title_upper = title.upper()
 
     # Try to find "COMMITTEE ON <name>" pattern first
@@ -690,6 +700,7 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
     metadata and meeting status. The API's systemCode matches our committee
     'code' field (e.g., 'ssbk00' for Senate Banking).
     """
+    _ensure_govinfo_maps()
     api_key = config.get_congress_api_key()
     congress = config.CONGRESS
 
@@ -859,6 +870,7 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
 
 def discover_govinfo(days: int = 7) -> list[Hearing]:
     """Poll GovInfo API for recently published hearing transcripts."""
+    _ensure_govinfo_maps()
 
     fetch_details = os.environ.get("GOVINFO_FETCH_DETAILS", "false").lower() == "true"
 
