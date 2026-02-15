@@ -15,3 +15,4 @@ source "$VENV/bin/activate"
 
 cd "$PROJECT_DIR"
 python3 digest.py 2>&1 | tee "$LOG_DIR/digest-$(date +%Y-%m-%d).log"
+exit "${PIPESTATUS[0]}"
