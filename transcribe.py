@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
+
+import httpx
 
 import config
 from utils import YT_DLP_ENV
@@ -45,7 +49,14 @@ def get_youtube_captions(youtube_url: str, output_dir: Path) -> Path | None:
         # Convert VTT to plain text
         raw = vtt_files[0].read_text()
         text = _vtt_to_text(raw)
-        captions_file.write_text(text)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=output_dir, suffix='.tmp')
+        try:
+            with os.fdopen(tmp_fd, 'w') as f:
+                f.write(text)
+            os.replace(tmp_path, captions_file)
+        except Exception:
+            os.unlink(tmp_path)
+            raise
         # Clean up VTT
         for f in vtt_files:
             f.unlink()
@@ -55,7 +66,7 @@ def get_youtube_captions(youtube_url: str, output_dir: Path) -> Path | None:
     except FileNotFoundError as e:
         log.error("CRITICAL: yt-dlp not found! Install it or check PATH. %s", e)
         raise
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         log.error("Caption download FAILED for %s: %s", youtube_url, e)
         return None
 
@@ -114,7 +125,7 @@ def download_audio(youtube_url: str, output_dir: Path) -> Path | None:
             return mp3s[0]
         log.warning("No audio file produced for %s", youtube_url)
         return None
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         log.warning("Audio download failed: %s", e)
         return None
 
@@ -205,7 +216,7 @@ def _split_audio(audio_path: Path, chunk_seconds: int = 1200) -> list[Path]:
             capture_output=True,
             timeout=300,
         )
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         log.error("ffmpeg split failed: %s", e)
         return []
     chunks = sorted(chunk_dir.glob("chunk_*.mp3"))
@@ -256,7 +267,7 @@ def process_hearing_audio(
                     "LLM cleanup: %d chars, $%.4f (%s)",
                     len(cleanup_result.text), cleanup_result.cost_usd, cleanup_result.model,
                 )
-            except Exception as e:
+            except (httpx.HTTPError, KeyError, ValueError, OSError) as e:
                 log.error("LLM cleanup FAILED for '%s': %s", hearing_title[:60], e)
 
     # Download and transcribe audio only if explicitly configured for Whisper

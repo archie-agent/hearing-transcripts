@@ -5,22 +5,22 @@ from discover import (
     _cross_committee_dedup,
     _deduplicate,
     _merge_adjacent_date_pairs,
-    _normalize_title,
     title_similarity,
 )
+from utils import normalize_title
 
 
 class TestNormalizeTitle:
     def test_strips_prefix(self):
-        result = _normalize_title("Full Committee Hearing: Some Important Topic")
+        result = normalize_title("Full Committee Hearing: Some Important Topic")
         assert "full" not in result.lower()
 
     def test_strips_hearing_notice(self):
-        result = _normalize_title("HEARING NOTICE: Budget Review Session 2026 Fiscal Year")
+        result = normalize_title("HEARING NOTICE: Budget Review Session 2026 Fiscal Year")
         assert "hearing notice" not in result.lower()
 
     def test_returns_first_8_words(self):
-        result = _normalize_title("one two three four five six seven eight nine ten")
+        result = normalize_title("one two three four five six seven eight nine ten")
         assert len(result.split()) == 8
 
 

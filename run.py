@@ -16,12 +16,15 @@ import json
 import logging
 import os
 import shutil
+import subprocess
+import tempfile
 import threading
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 
 # Load .env before importing config
@@ -164,7 +167,7 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
                 cost["whisper_usd"] += audio_result.get("whisper_cost_usd", 0)
                 state.mark_step(hearing.id, "captions", "done")
                 state.mark_step(hearing.id, "cleanup", "done")
-            except Exception as e:
+            except (subprocess.SubprocessError, httpx.HTTPError, OSError, ValueError) as e:
                 state.mark_step(hearing.id, "captions", "failed", error=str(e))
                 log.error("Caption processing failed for %s: %s", hearing.id, e)
         else:
@@ -184,7 +187,14 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
                 isvp_text = fetch_isvp_captions(isvp_comm, isvp_filename)
                 if isvp_text:
                     isvp_path = hearing_dir / "isvp_transcript.txt"
-                    isvp_path.write_text(isvp_text)
+                    tmp_fd, tmp_path = tempfile.mkstemp(dir=isvp_path.parent, suffix='.tmp')
+                    try:
+                        with os.fdopen(tmp_fd, 'w') as f:
+                            f.write(isvp_text)
+                        os.replace(tmp_path, isvp_path)
+                    except Exception:
+                        os.unlink(tmp_path)
+                        raise
                     result["outputs"]["isvp_transcript"] = str(isvp_path)
                     state.mark_step(hearing.id, "isvp_fetched", "done")
                     log.info(
@@ -192,7 +202,7 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
                         len(isvp_text), hearing.id,
                     )
                 state.mark_step(hearing.id, "isvp", "done")
-            except Exception as e:
+            except (httpx.HTTPError, OSError, ValueError) as e:
                 state.mark_step(hearing.id, "isvp", "failed", error=str(e))
                 log.error("ISVP caption fetch failed for %s: %s", hearing.id, e)
         else:
@@ -211,7 +221,14 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
                         skip_diarization=True,
                     )
                     cleaned_path = hearing_dir / "isvp_cleaned.txt"
-                    cleaned_path.write_text(cleanup_result.text)
+                    tmp_fd, tmp_path = tempfile.mkstemp(dir=cleaned_path.parent, suffix='.tmp')
+                    try:
+                        with os.fdopen(tmp_fd, 'w') as f:
+                            f.write(cleanup_result.text)
+                        os.replace(tmp_path, cleaned_path)
+                    except Exception:
+                        os.unlink(tmp_path)
+                        raise
                     result["outputs"]["isvp_cleaned"] = str(cleaned_path)
                     cost["llm_cleanup_usd"] += cleanup_result.cost_usd
                     state.mark_step(hearing.id, "isvp_cleanup", "done")
@@ -220,7 +237,7 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
                         len(isvp_raw), len(cleanup_result.text),
                         cleanup_result.cost_usd, hearing.id,
                     )
-                except Exception as e:
+                except (httpx.HTTPError, OSError, ValueError) as e:
                     state.mark_step(hearing.id, "isvp_cleanup", "failed", error=str(e))
                     log.error("ISVP cleanup failed for %s: %s", hearing.id, e)
 
@@ -244,7 +261,7 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
             except ImportError:
                 log.debug("cspan module not available, skipping")
                 state.mark_step(hearing.id, "cspan", "done")
-            except Exception as e:
+            except (TimeoutError, OSError, ValueError) as e:
                 state.mark_step(hearing.id, "cspan", "failed", error=str(e))
                 log.error("C-SPAN caption fetch failed for %s: %s", hearing.id, e)
         else:
@@ -263,7 +280,14 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
                         skip_diarization=True,
                     )
                     cleaned_path = hearing_dir / "cspan_cleaned.txt"
-                    cleaned_path.write_text(cleanup_result.text)
+                    tmp_fd, tmp_path = tempfile.mkstemp(dir=cleaned_path.parent, suffix='.tmp')
+                    try:
+                        with os.fdopen(tmp_fd, 'w') as f:
+                            f.write(cleanup_result.text)
+                        os.replace(tmp_path, cleaned_path)
+                    except Exception:
+                        os.unlink(tmp_path)
+                        raise
                     result["outputs"]["cspan_cleaned"] = str(cleaned_path)
                     cost["llm_cleanup_usd"] += cleanup_result.cost_usd
                     state.mark_step(hearing.id, "cspan_cleanup", "done")
@@ -272,7 +296,7 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
                         len(cspan_raw), len(cleanup_result.text),
                         cleanup_result.cost_usd, hearing.id,
                     )
-                except Exception as e:
+                except (httpx.HTTPError, OSError, ValueError) as e:
                     state.mark_step(hearing.id, "cspan_cleanup", "failed", error=str(e))
                     log.error("C-SPAN cleanup failed for %s: %s", hearing.id, e)
     # (If no cspan_url, leave cspan step unmarked so it can be retried
@@ -289,7 +313,7 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
                 pdf_results = process_testimony_pdfs(pdf_urls, hearing_dir)
                 result["outputs"]["testimony"] = pdf_results
                 state.mark_step(hearing.id, "testimony", "done")
-            except Exception as e:
+            except (httpx.HTTPError, OSError, ValueError) as e:
                 state.mark_step(hearing.id, "testimony", "failed", error=str(e))
                 log.error("Testimony extraction failed for %s: %s", hearing.id, e)
     else:
@@ -305,7 +329,7 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
                 if gpo_path:
                     result["outputs"]["govinfo_transcript"] = str(gpo_path)
                 state.mark_step(hearing.id, "govinfo", "done")
-            except Exception as e:
+            except (httpx.HTTPError, OSError, ValueError) as e:
                 state.mark_step(hearing.id, "govinfo", "failed", error=str(e))
                 log.error("GovInfo fetch failed for %s: %s", hearing.id, e)
     else:

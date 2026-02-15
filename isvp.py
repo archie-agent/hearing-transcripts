@@ -24,6 +24,8 @@ import logging
 import re
 from urllib.parse import parse_qs, urljoin, urlparse
 
+import httpx
+
 from utils import get_http_client
 
 log = logging.getLogger(__name__)
@@ -247,7 +249,7 @@ def _fetch_url(client, url: str) -> str | None:
             log.debug("HTTP %d for %s", resp.status_code, url)
             return None
         return resp.text
-    except Exception as e:
+    except (httpx.HTTPError, OSError) as e:
         log.debug("Fetch error for %s: %s", url, e)
         return None
 

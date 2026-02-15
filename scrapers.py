@@ -30,6 +30,13 @@ class ScrapedHearing(NamedTuple):
     url: str   # absolute URL to hearing detail page
 
 
+# Pre-compiled patterns for parse_date
+_DATE_ISO_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+_DATE_SLASH_RE = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{2,4})")
+_DATE_DOT_RE = re.compile(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})")
+_DATE_MONTH_RE = re.compile(r"(\w+)\s+(\d{1,2}),?\s+(\d{4})")
+
+
 def parse_date(text: str) -> str | None:
     """Parse a date from various formats. Returns YYYY-MM-DD or None."""
     text = text.strip()
@@ -37,12 +44,12 @@ def parse_date(text: str) -> str | None:
         return None
 
     # ISO 8601: 2026-02-10 or 2026-02-10T15:30:00Z
-    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", text)
+    m = _DATE_ISO_RE.search(text)
     if m:
         return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
 
     # MM/DD/YY or MM/DD/YYYY (with optional time)
-    m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", text)
+    m = _DATE_SLASH_RE.search(text)
     if m:
         month, day, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if year < 100:
@@ -50,7 +57,7 @@ def parse_date(text: str) -> str | None:
         return f"{year:04d}-{month:02d}-{day:02d}"
 
     # MM.DD.YY or MM.DD.YYYY (Senate Budget, HELP, Judiciary, Armed Services)
-    m = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})", text)
+    m = _DATE_DOT_RE.search(text)
     if m:
         month, day, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if year < 100:
@@ -58,7 +65,7 @@ def parse_date(text: str) -> str | None:
         return f"{year:04d}-{month:02d}-{day:02d}"
 
     # Month DD, YYYY or Mon DD, YYYY
-    m = re.search(r"(\w+)\s+(\d{1,2}),?\s+(\d{4})", text)
+    m = _DATE_MONTH_RE.search(text)
     if m:
         month_name = m.group(1).lower()
         if month_name in _MONTHS:
@@ -668,12 +675,12 @@ def scrape_website(scraper_type: str, html: str, base_url: str, cutoff: datetime
     """Dispatch to the right scraper based on type. Returns [] if type unknown."""
     fn = SCRAPER_REGISTRY.get(scraper_type)
     if not fn:
-        if scraper_type != "youtube_only":
-            log.warning("Unknown scraper type: %s", scraper_type)
-        return []
+        if scraper_type == "youtube_only":
+            return []
+        raise ValueError(f"Unknown scraper type: {scraper_type}")
     try:
         return fn(html, base_url, cutoff)
-    except Exception as e:
+    except (AttributeError, ValueError, TypeError) as e:
         log.warning("Scraper %s failed: %s", scraper_type, e)
         return []
 
@@ -789,21 +796,21 @@ def scrape_js_rendered(
         page.wait_for_timeout(6000)
         html = page.content()
 
-    except Exception as e:
+    except (TimeoutError, OSError, ConnectionError) as e:
         log.warning("JS scraper: browser connection failed for %s: %s", hearings_url, e)
         return []
     finally:
         if page:
             try:
                 page.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Error closing page: %s", exc)
         # Do NOT close the browser — it's the shared clawdbot instance
         if pw:
             try:
                 pw.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Error stopping playwright: %s", exc)
 
     # Dispatch to the designated scraper
     results = scrape_website(scraper_type, html, base_url, cutoff)

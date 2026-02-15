@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import tempfile
 import time as _time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -44,16 +46,16 @@ _MAX_CSPAN_SEARCHES = 8  # WAF triggers captcha after ~2 pages; each retry costs
 
 # Batch cooldown: pause between groups of searches to look more human-like.
 # WAF is very aggressive (~2 pages), so we cool down after every 2 searches.
-BATCH_SIZE = 2
-BATCH_COOLDOWN = 45  # seconds between batches
+_BATCH_SIZE = 2
+_BATCH_COOLDOWN = 45  # seconds between batches
 
 
 def _batch_cooldown(searches_done: int, label: str) -> None:
-    """Sleep for BATCH_COOLDOWN if we've hit a batch boundary."""
-    if searches_done > 0 and searches_done % BATCH_SIZE == 0:
+    """Sleep for _BATCH_COOLDOWN if we've hit a batch boundary."""
+    if searches_done > 0 and searches_done % _BATCH_SIZE == 0:
         log.info("C-SPAN %s: cooldown (%ds) after %d searches",
-                 label, BATCH_COOLDOWN, searches_done)
-        _time.sleep(BATCH_COOLDOWN)
+                 label, _BATCH_COOLDOWN, searches_done)
+        _time.sleep(_BATCH_COOLDOWN)
 
 
 # Pre-compiled regex patterns for transcript processing
@@ -207,7 +209,7 @@ def discover_cspan_targeted(
                 if state:
                     state.record_cspan_title_search(h["id"], found=found)
 
-            except Exception as e:
+            except (TimeoutError, OSError, ValueError) as e:
                 log.warning("C-SPAN targeted search failed for '%s': %s",
                             h["title"][:40], e)
                 if state:
@@ -283,7 +285,7 @@ def discover_cspan_rotation(
 
                 return _parse_search_results(page, cutoff)
 
-            except Exception as e:
+            except (TimeoutError, OSError, ValueError) as e:
                 log.warning("C-SPAN rotation search failed for %s: %s", label, e)
                 return []
 
@@ -457,7 +459,7 @@ def discover_cspan_by_committee(
                 else:
                     log.debug("  C-SPAN by-committee %s: no recent hearings", key)
 
-            except Exception as e:
+            except (TimeoutError, OSError, ValueError) as e:
                 log.warning("C-SPAN by-committee search failed for %s: %s", key, e)
 
         browser.close()
@@ -542,7 +544,7 @@ def _parse_search_results(page, cutoff: datetime) -> list[dict]:
                 "program_id": program_id,
             })
 
-        except Exception as e:
+        except (ValueError, AttributeError, KeyError, TypeError) as e:
             log.debug("Error parsing C-SPAN search result: %s", e)
             continue
 
@@ -679,7 +681,7 @@ def discover_cspan_google(
             else:
                 log.debug("DDG C-SPAN: no match for '%s'", h["title"][:50])
 
-        except Exception as e:
+        except (httpx.HTTPError, OSError, ValueError) as e:
             log.debug("DDG search error for '%s': %s", keywords[:30], e)
             continue
 
@@ -753,7 +755,7 @@ def fetch_cspan_transcript(
                 }
             """, program_id)
 
-        except Exception as e:
+        except (TimeoutError, OSError) as e:
             log.warning("Error loading C-SPAN page %s: %s", video_url, e)
         finally:
             browser.close()
@@ -781,10 +783,17 @@ def fetch_cspan_transcript(
         log.warning("Empty transcript after processing for program %s", program_id)
         return None
 
-    # Write transcript
+    # Write transcript (atomic: temp file + rename)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "cspan_transcript.txt"
-    output_path.write_text(transcript)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=output_path.parent, suffix='.tmp')
+    try:
+        with os.fdopen(tmp_fd, 'w') as f:
+            f.write(transcript)
+        os.replace(tmp_path, output_path)
+    except Exception:
+        os.unlink(tmp_path)
+        raise
 
     log.info(
         "C-SPAN transcript: %d chars, %d segments -> %s",

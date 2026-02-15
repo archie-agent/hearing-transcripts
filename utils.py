@@ -8,6 +8,7 @@ from threading import Lock
 
 import httpx
 
+USER_AGENT = "Mozilla/5.0 (compatible; HearingBot/1.0)"
 
 # Common stopwords for hearing title keyword extraction / comparison.
 # Shared by discover.py and cspan.py.
@@ -36,7 +37,7 @@ def get_http_client(retries: int = 3, timeout: float = 20.0) -> httpx.Client:
         transport=transport,
         timeout=timeout,
         follow_redirects=True,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; HearingBot/1.0)"},
+        headers={"User-Agent": USER_AGENT},
     )
 
 

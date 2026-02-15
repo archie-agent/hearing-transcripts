@@ -10,7 +10,7 @@ import httpx
 
 import config
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 # Default chunking parameters
 DEFAULT_CHUNK_SIZE = 3000  # tokens (approximate)

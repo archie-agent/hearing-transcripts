@@ -22,7 +22,7 @@ from llm_utils import (
     split_into_chunks,
 )
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -188,18 +188,18 @@ def cleanup_transcript(
     """
     if model is None:
         model = config.CLEANUP_MODEL
-    logger.info(f"Starting cleanup with model: {model}")
+    log.info("Starting cleanup with model: %s", model)
 
     # Get API key (lazy loading)
     api_key = get_api_key()
 
     # Check if we need to chunk
     estimated_tokens = estimate_tokens(raw_text)
-    logger.info(f"Estimated tokens: {estimated_tokens}")
+    log.info("Estimated tokens: %d", estimated_tokens)
 
     if estimated_tokens > DEFAULT_CHUNK_SIZE:
         chunks = split_into_chunks(raw_text)
-        logger.info(f"Split into {len(chunks)} chunks")
+        log.info("Split into %d chunks", len(chunks))
     else:
         chunks = [raw_text]
 
@@ -209,7 +209,7 @@ def cleanup_transcript(
     total_output_tokens = 0
 
     for i, chunk in enumerate(chunks):
-        logger.info(f"Processing chunk {i + 1}/{len(chunks)}")
+        log.info("Processing chunk %d/%d", i + 1, len(chunks))
 
         build_prompt = _build_cleanup_prompt if skip_diarization else _build_diarization_prompt
         prompt = build_prompt(
@@ -234,9 +234,9 @@ def cleanup_transcript(
         total_input_tokens += input_tokens
         total_output_tokens += output_tokens
 
-        logger.info(
-            f"Chunk {i + 1}: {input_tokens} input tokens, "
-            f"{output_tokens} output tokens"
+        log.info(
+            "Chunk %d: %d input tokens, %d output tokens",
+            i + 1, input_tokens, output_tokens,
         )
 
     # Combine chunks
@@ -245,11 +245,9 @@ def cleanup_transcript(
     # Calculate cost
     cost = calculate_cost(model, total_input_tokens, total_output_tokens)
 
-    logger.info(
-        f"Cleanup complete: {len(chunks)} chunks, "
-        f"{total_input_tokens} input tokens, "
-        f"{total_output_tokens} output tokens, "
-        f"${cost:.4f}"
+    log.info(
+        "Cleanup complete: %d chunks, %d input tokens, %d output tokens, $%.4f",
+        len(chunks), total_input_tokens, total_output_tokens, cost,
     )
 
     return CleanupResult(

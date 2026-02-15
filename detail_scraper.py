@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
+import httpx
 from bs4 import BeautifulSoup, Tag
 
 from isvp import extract_isvp_url
@@ -47,6 +48,16 @@ _EXCLUDE_KEYWORDS = re.compile(
     r"livestream|webcast|video|archive|press\s+release|"
     r"add\s+to\s+calendar|rss|share|print|twitter|facebook|"
     r"instagram|youtube|podcast",
+    re.IGNORECASE,
+)
+
+# Pre-compiled patterns for link filter functions
+_FILE_EXT_RE = re.compile(r"\.\w{2,4}$")
+_WP_UPLOAD_PDF_RE = re.compile(r"/wp-content/uploads/\d{4}/\d{2}/[^/]+\.pdf", re.IGNORECASE)
+_FILES_SERVE_RE = re.compile(r"files\.serve", re.IGNORECASE)
+_FILE_ID_RE = re.compile(r"file_id=", re.IGNORECASE)
+_HOUSE_DOC_PATH_RE = re.compile(
+    r"/sites/default/files/|/uploads/|/documents/|/files/",
     re.IGNORECASE,
 )
 
@@ -164,7 +175,7 @@ def _fetch_detail_page(url: str) -> str | None:
                 log.warning("Detail page HTTP %s: %s", resp.status_code, url)
                 return None
             return resp.text
-    except Exception as e:
+    except (httpx.HTTPError, OSError) as e:
         log.warning("Detail page fetch error for %s: %s", url, e)
         return None
 
@@ -190,7 +201,7 @@ def _accept_drupal_link(link: Tag, href: str) -> bool:
     if _has_testimony_signal(link):
         if "/download/" in href or "/services/files/" in href:
             return True
-        if re.search(r"\.\w{2,4}$", href.split("?")[0]):
+        if _FILE_EXT_RE.search(href.split("?")[0]):
             return True
     return False
 
@@ -203,12 +214,12 @@ def _accept_wordpress_link(link: Tag, href: str) -> bool:
     - Any href recognized by _is_pdf_href
     - Testimony-signalled links with a file-like extension
     """
-    if re.search(r"/wp-content/uploads/\d{4}/\d{2}/[^/]+\.pdf", href, re.IGNORECASE):
+    if _WP_UPLOAD_PDF_RE.search(href):
         return True
     if _is_pdf_href(href):
         return True
     if _has_testimony_signal(link):
-        if re.search(r"\.\w{2,4}$", href.split("?")[0]):
+        if _FILE_EXT_RE.search(href.split("?")[0]):
             return True
     return False
 
@@ -221,12 +232,12 @@ def _accept_coldfusion_link(link: Tag, href: str) -> bool:
     - Any href recognized by _is_pdf_href
     - Testimony-signalled links with file_id= parameter
     """
-    if re.search(r"files\.serve", href, re.IGNORECASE):
+    if _FILES_SERVE_RE.search(href):
         return True
     if _is_pdf_href(href):
         return True
     if _has_testimony_signal(link):
-        if re.search(r"file_id=", href, re.IGNORECASE):
+        if _FILE_ID_RE.search(href):
             return True
     return False
 
@@ -244,10 +255,7 @@ def _accept_house_link(link: Tag, href: str) -> bool:
     if _is_pdf_href(href):
         if _has_testimony_signal(link):
             return True
-        if re.search(
-            r"/sites/default/files/|/uploads/|/documents/|/files/",
-            href, re.IGNORECASE,
-        ):
+        if _HOUSE_DOC_PATH_RE.search(href):
             return True
     if "docs.house.gov" in href and _has_testimony_signal(link):
         return True
@@ -265,10 +273,7 @@ def _accept_aspnet_link(link: Tag, href: str) -> bool:
     if _is_pdf_href(href):
         if _has_testimony_signal(link):
             return True
-        if re.search(
-            r"/sites/default/files/|/uploads/|/documents/|/files/",
-            href, re.IGNORECASE,
-        ):
+        if _HOUSE_DOC_PATH_RE.search(href):
             return True
     return False
 

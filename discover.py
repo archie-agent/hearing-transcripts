@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -20,7 +21,7 @@ import httpx
 import config
 import scrapers
 from detail_scraper import scrape_hearing_detail
-from utils import TITLE_STOPWORDS, RateLimiter, YT_DLP_ENV, normalize_title, _TITLE_CLEAN_RE
+from utils import TITLE_STOPWORDS, USER_AGENT, RateLimiter, YT_DLP_ENV, normalize_title, _TITLE_CLEAN_RE
 
 log = logging.getLogger(__name__)
 
@@ -51,10 +52,10 @@ class Hearing:
     #   website_url, testimony_pdf_urls,
     #   govinfo_package_id
 
-    @property
+    @functools.cached_property
     def id(self) -> str:
         """Deterministic hearing ID from key fields."""
-        normalized = _normalize_title(self.title)
+        normalized = normalize_title(self.title)
         raw = f"{self.committee_key}:{self.date}:{normalized}"
         return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
@@ -67,9 +68,6 @@ class Hearing:
         return f"{chamber}-{committee}-{safe}"
 
 
-# Title normalization is in utils.normalize_title (canonical version).
-# _normalize_title alias for backward compatibility with this module's internal use.
-_normalize_title = normalize_title
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +81,7 @@ def _http_get(url: str, timeout: float = 20.0) -> httpx.Response | None:
     try:
         with httpx.Client(transport=transport, timeout=timeout,
                           follow_redirects=True,
-                          headers={"User-Agent": "Mozilla/5.0 (compatible; HearingBot/1.0)"}) as client:
+                          headers={"User-Agent": USER_AGENT}) as client:
             resp = client.get(url)
             # Handle 429 Too Many Requests with backoff
             if resp.status_code == 429:
@@ -322,7 +320,7 @@ def _attach_youtube_clips(hearings: list[Hearing]) -> None:
             # Must be same date (or within 1 day to handle upload-date drift)
             if h.date != clip["date"]:
                 continue
-            sim = _title_similarity(h.title, clip["title"])
+            sim = title_similarity(h.title, clip["title"])
             if sim > best_sim:
                 best_sim = sim
                 best_match = h
@@ -354,7 +352,8 @@ def _attach_youtube_clips(hearings: list[Hearing]) -> None:
     if unmatched:
         log.debug("  %d YouTube clips unmatched (no website hearing found)", unmatched)
 
-    _youtube_clips.clear()
+    with _youtube_clips_lock:
+        _youtube_clips.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +448,7 @@ def discover_cspan_youtube(hearings: list[Hearing], days: int = 7) -> int:
             if ("youtube_url" in h.sources
                     and h.sources.get("youtube_duration", 0) >= 1800):
                 continue
-            sim = _title_similarity(h.title, video["title"])
+            sim = title_similarity(h.title, video["title"])
             if sim > best_sim:
                 best_sim = sim
                 best_match = h
@@ -535,10 +534,11 @@ _GOVINFO_CODE_MAP: dict[str, str] = {}
 # Multiple committees can share a fragment (e.g., "judiciary" maps to both
 # house.judiciary and senate.judiciary), so values are lists.
 _GOVINFO_NAME_MAP: dict[str, list[str]] = {}
+_GOVINFO_SORTED_FRAGMENTS: list[str] = []
 
 def _build_govinfo_map() -> None:
     """Build mapping from GovInfo package codes and name fragments to committee keys."""
-    global _GOVINFO_CODE_MAP, _GOVINFO_NAME_MAP
+    global _GOVINFO_CODE_MAP, _GOVINFO_NAME_MAP, _GOVINFO_SORTED_FRAGMENTS
     _GOVINFO_CODE_MAP.clear()
     _GOVINFO_NAME_MAP.clear()
     for key, meta in config.get_all_committees().items():
@@ -562,6 +562,8 @@ def _build_govinfo_map() -> None:
             fragment = stripped.lower().strip()
             if fragment:
                 _GOVINFO_NAME_MAP.setdefault(fragment, []).append(key)
+
+    _GOVINFO_SORTED_FRAGMENTS = sorted(_GOVINFO_NAME_MAP.keys(), key=len, reverse=True)
 
 # Build at import time — committee data is always available
 _build_govinfo_map()
@@ -601,11 +603,9 @@ def _map_govinfo_to_committee(title: str, chamber: str) -> str | None:
     chamber_prefix = f"{chamber}." if chamber and chamber != "unknown" else ""
 
     # Try longest fragments first for best specificity
-    sorted_fragments = sorted(_GOVINFO_NAME_MAP.keys(), key=len, reverse=True)
-
     for candidate in candidates:
         candidate_lower = candidate.lower()
-        for fragment in sorted_fragments:
+        for fragment in _GOVINFO_SORTED_FRAGMENTS:
             if fragment not in candidate_lower:
                 continue
             keys = _GOVINFO_NAME_MAP[fragment]
@@ -647,6 +647,7 @@ def _fetch_govinfo_committee(package_id: str) -> str | None:
     elif "shrg" in pkg_lower:
         chamber = "senate"
     else:
+        log.warning("Unknown chamber for GovInfo package %s", package_id)
         chamber = "unknown"
 
     # Check for "committees" field in the summary JSON
@@ -679,14 +680,7 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
     api_key = config.get_congress_api_key()
     congress = config.CONGRESS
 
-    # Build reverse lookup: {systemCode: committee_key}
-    code_to_key: dict[str, str] = {}
-    for key, meta in config.get_all_committees().items():
-        code = meta.get("code", "")
-        if code:
-            code_to_key[code] = key
-
-    if not code_to_key:
+    if not _GOVINFO_CODE_MAP:
         log.warning("No committee codes configured, skipping congress.gov API")
         return []
 
@@ -795,13 +789,13 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
             sys_code = comm.get("systemCode", "")
             if not sys_code:
                 continue
-            if sys_code in code_to_key:
-                committee_key = code_to_key[sys_code]
+            if sys_code in _GOVINFO_CODE_MAP:
+                committee_key = _GOVINFO_CODE_MAP[sys_code]
                 break
             # Try parent committee code (e.g., hsif16 -> hsif00)
             parent_code = sys_code[:4] + "00"
-            if parent_code in code_to_key:
-                committee_key = code_to_key[parent_code]
+            if parent_code in _GOVINFO_CODE_MAP:
+                committee_key = _GOVINFO_CODE_MAP[parent_code]
                 break
 
         if not committee_key:
@@ -941,7 +935,7 @@ def _discover_committee(key: str, meta: dict, days: int) -> list[Hearing]:
         if yt:
             log.info("  %s YouTube: %d videos", key, len(yt))
             results.extend(yt)
-    except Exception as e:
+    except (subprocess.SubprocessError, httpx.HTTPError, OSError, ValueError) as e:
         log.warning("YouTube discovery failed for %s: %s", key, e)
 
     # Website
@@ -950,7 +944,7 @@ def _discover_committee(key: str, meta: dict, days: int) -> list[Hearing]:
         if web:
             log.info("  %s website: %d hearings", key, len(web))
             results.extend(web)
-    except Exception as e:
+    except (httpx.HTTPError, OSError, ValueError, AttributeError) as e:
         log.warning("Website discovery failed for %s: %s", key, e)
 
     return results
@@ -1010,7 +1004,8 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
     if committees is None:
         committees = config.get_committees()
 
-    _youtube_clips.clear()  # Reset from any prior call in same process
+    with _youtube_clips_lock:
+        _youtube_clips.clear()  # Reset from any prior call in same process
     all_hearings: list[Hearing] = []
 
     # Parallel discovery across committees
@@ -1024,7 +1019,7 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
             try:
                 hearings = future.result()
                 all_hearings.extend(hearings)
-            except Exception as e:
+            except (subprocess.SubprocessError, httpx.HTTPError, OSError, ValueError) as e:
                 log.error("Discovery failed for %s: %s", key, e)
 
     # GovInfo (catches both chambers, longer lookback)
@@ -1033,7 +1028,7 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
         if govinfo:
             log.info("GovInfo: %d packages", len(govinfo))
             all_hearings.extend(govinfo)
-    except Exception as e:
+    except (httpx.HTTPError, OSError, ValueError, KeyError) as e:
         log.warning("GovInfo discovery failed: %s", e)
 
     # Congress.gov API (structured data with witnesses)
@@ -1042,7 +1037,7 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
         if congress_api:
             log.info("congress.gov API: %d hearings", len(congress_api))
             all_hearings.extend(congress_api)
-    except Exception as e:
+    except (httpx.HTTPError, OSError, ValueError, KeyError) as e:
         log.warning("congress.gov API discovery failed: %s", e)
 
     # Filter markups and procedural sessions (not real hearings)
@@ -1079,7 +1074,7 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
         n_yt = discover_cspan_youtube(deduped, days=max(days, 7))
         if n_yt:
             log.info("C-SPAN YouTube: matched %d hearing(s)", n_yt)
-    except Exception as e:
+    except (subprocess.SubprocessError, httpx.HTTPError, OSError, ValueError) as e:
         log.warning("C-SPAN YouTube discovery failed: %s", e)
 
     # C-SPAN discovery: 4-step strategy
@@ -1146,7 +1141,7 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
 
     except ImportError:
         log.debug("cspan module not available, skipping C-SPAN discovery")
-    except Exception as e:
+    except (httpx.HTTPError, OSError, ValueError, TimeoutError) as e:
         log.warning("C-SPAN discovery failed: %s", e)
 
     # Deterministic ISVP params for Senate hearings (before detail scraping,
@@ -1175,7 +1170,7 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
             if detail.youtube_url and not hearing.sources.get("youtube_url"):
                 hearing.sources["youtube_url"] = detail.youtube_url
                 hearing.sources["youtube_id"] = detail.youtube_id
-        except Exception as e:
+        except (httpx.HTTPError, OSError, ValueError) as e:
             log.warning("PDF extraction failed for %s: %s", website_url, e)
 
     return deduped
@@ -1215,7 +1210,7 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
 
     for h in hearings:
         # Dedup key includes normalized title prefix to handle same-day hearings
-        title_key = _normalize_title(h.title)
+        title_key = normalize_title(h.title)
         dedup_key = f"{h.committee_key}:{h.date}:{title_key}"
 
         if dedup_key in merged:
@@ -1231,7 +1226,7 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
             # committee+date is similar enough to merge
             fuzzy_match = None
             for existing in by_key_date.get((h.committee_key, h.date), []):
-                if _title_similarity(h.title, existing.title) >= 0.30:
+                if title_similarity(h.title, existing.title) >= 0.30:
                     fuzzy_match = existing
                     break
 
@@ -1245,7 +1240,7 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
                         # Only do adjacent-date merge when YouTube is involved
                         if not (_has_youtube_source(h) or _has_youtube_source(existing)):
                             continue
-                        if _title_similarity(h.title, existing.title) >= 0.45:
+                        if title_similarity(h.title, existing.title) >= 0.45:
                             fuzzy_match = existing
                             # Prefer the earlier date (actual hearing date)
                             if h.date < existing.date:
@@ -1299,7 +1294,7 @@ def _merge_adjacent_date_pairs(hearings: list[Hearing]) -> list[Hearing]:
                 # Require YouTube on at least one side
                 if not (_has_youtube_source(h) or _has_youtube_source(other)):
                     continue
-                if _title_similarity(h.title, other.title) >= 0.45:
+                if title_similarity(h.title, other.title) >= 0.45:
                     # Merge: prefer higher authority, then more sources
                     if h.source_authority != other.source_authority:
                         winner, loser = (h, other) if h.source_authority >= other.source_authority else (other, h)
@@ -1340,8 +1335,6 @@ def title_similarity(title_a: str, title_b: str) -> float:
         return 0.0
     return len(words_a & words_b) / len(words_a | words_b)
 
-# Backward-compatible alias
-_title_similarity = title_similarity
 
 
 def _chamber_from_key(committee_key: str) -> str:
@@ -1418,7 +1411,7 @@ def _cross_committee_dedup(hearings: list[Hearing]) -> list[Hearing]:
                     continue
 
                 # Compare titles
-                sim = _title_similarity(h_i.title, h_j.title)
+                sim = title_similarity(h_i.title, h_j.title)
                 if sim > _CROSS_DEDUP_THRESHOLD:
                     # Merge j into i
                     winner_key = _preferred_key(h_i.committee_key, h_j.committee_key)

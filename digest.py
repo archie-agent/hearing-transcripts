@@ -34,7 +34,7 @@ from llm_utils import (
 )
 from state import State
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 MAX_QUOTES = 30
 AGENTMAIL_SENDER = "archie-agent@agentmail.to"
@@ -64,7 +64,7 @@ def find_recent_transcripts(lookback_days: int) -> list[dict]:
     """Read index.json and return transcripts from the last N days."""
     index_path = config.TRANSCRIPTS_DIR / "index.json"
     if not index_path.exists():
-        logger.error("index.json not found at %s", index_path)
+        log.error("index.json not found at %s", index_path)
         return []
 
     with open(index_path, encoding="utf-8") as f:
@@ -89,7 +89,7 @@ def find_recent_transcripts(lookback_days: int) -> list[dict]:
         meta_file = transcript_dir / "meta.json"
 
         if not transcript_file.exists():
-            logger.debug("No transcript.txt for %s, skipping", entry["id"])
+            log.debug("No transcript.txt for %s, skipping", entry["id"])
             continue
 
         meta = {}
@@ -106,7 +106,7 @@ def find_recent_transcripts(lookback_days: int) -> list[dict]:
             "meta": meta,
         })
 
-    logger.info("Found %d transcripts in last %d days", len(recent), lookback_days)
+    log.info("Found %d transcripts in last %d days", len(recent), lookback_days)
     return recent
 
 
@@ -152,7 +152,7 @@ def extract_quotes_from_transcript(
 
     source_url = _get_source_url(hearing["meta"])
     chunks = split_into_chunks(text, chunk_size=4000, overlap=200)
-    logger.info(
+    log.info(
         "Extracting quotes from '%s' (%d chunks)",
         hearing["title"][:60],
         len(chunks),
@@ -176,7 +176,7 @@ def extract_quotes_from_transcript(
 
             raw = response["choices"][0]["message"]["content"]
         except (httpx.HTTPError, KeyError, IndexError) as e:
-            logger.warning(
+            log.warning(
                 "Quote extraction failed for chunk %d of %s: %s", i, hearing["id"], e
             )
             continue
@@ -188,10 +188,11 @@ def extract_quotes_from_transcript(
         try:
             items = json.loads(raw)
         except json.JSONDecodeError:
-            logger.warning("Failed to parse quote JSON for %s", hearing["id"])
+            log.warning("Failed to parse quote JSON for %s", hearing["id"])
             continue
 
         if not isinstance(items, list):
+            log.warning("LLM returned non-list items for %s (type=%s), skipping chunk", hearing["id"], type(items).__name__)
             continue
 
         for item in items:
@@ -207,7 +208,7 @@ def extract_quotes_from_transcript(
                 source_url=source_url,
             ))
 
-    logger.info(
+    log.info(
         "Extracted %d quotes from '%s' ($%.4f)",
         len(all_quotes),
         hearing["title"][:60],
@@ -226,7 +227,7 @@ def score_quotes(quotes: list[Quote]) -> tuple[list[Quote], float]:
     try:
         from interest_model.core import InterestModel
     except ImportError:
-        logger.warning("interest_model not installed — skipping scoring, keeping all quotes")
+        log.warning("interest_model not installed — skipping scoring, keeping all quotes")
         return quotes[:MAX_QUOTES], 0.0
 
     model = InterestModel()
@@ -239,7 +240,7 @@ def score_quotes(quotes: list[Quote]) -> tuple[list[Quote], float]:
     filtered.sort(key=lambda q: q.score, reverse=True)
     filtered = filtered[:MAX_QUOTES]
 
-    logger.info(
+    log.info(
         "Scoring: %d total → %d above threshold (%.2f)",
         len(quotes),
         len(filtered),
@@ -298,12 +299,12 @@ def compose_digest(quotes: list[Quote], api_key: str) -> tuple[str, float]:
         )
         body = response["choices"][0]["message"]["content"]
     except httpx.HTTPError as e:
-        logger.warning("Transient HTTP error composing digest: %s", e)
+        log.warning("Transient HTTP error composing digest: %s", e)
         return "", 0.0
     except (KeyError, IndexError) as e:
         raise ValueError(f"Unexpected API response shape in compose_digest: {e}") from e
 
-    logger.info("Composed digest (%d chars, $%.4f)", len(body), cost)
+    log.info("Composed digest (%d chars, $%.4f)", len(body), cost)
     return body, cost
 
 
@@ -339,13 +340,13 @@ def polish_digest(body: str, api_key: str) -> tuple[str, float]:
         )
         polished = response["choices"][0]["message"]["content"]
     except httpx.HTTPError as e:
-        logger.warning("Polish step failed (transient HTTP error), using unpolished version: %s", e)
+        log.warning("Polish step failed (transient HTTP error), using unpolished version: %s", e)
         return body, cost
     except (KeyError, IndexError) as e:
-        logger.warning("Polish step got unexpected response shape, using unpolished version: %s", e)
+        log.warning("Polish step got unexpected response shape, using unpolished version: %s", e)
         return body, cost
 
-    logger.info("Polished digest (%d chars, $%.4f)", len(polished), cost)
+    log.info("Polished digest (%d chars, $%.4f)", len(polished), cost)
     return polished, cost
 
 
@@ -511,9 +512,11 @@ def deliver_digest(
 
     # Load AgentMail API key from ~/.env.agentmail (won't override existing env vars)
     load_dotenv(Path.home() / ".env.agentmail")
+    if not (Path.home() / ".env.agentmail").exists():
+        log.debug(".env.agentmail not found in home directory")
     api_key = os.environ.get("AGENTMAIL_API_KEY")
     if not api_key:
-        logger.error("AGENTMAIL_API_KEY not found — cannot send email")
+        log.error("AGENTMAIL_API_KEY not found — cannot send email")
         return False
 
     try:
@@ -526,7 +529,7 @@ def deliver_digest(
 
         client = AgentMail(api_key=api_key)
     except ImportError:
-        logger.error("agentmail package not installed")
+        log.error("agentmail package not installed")
         return False
 
     html_body = _markdown_to_simple_html(markdown)
@@ -540,7 +543,7 @@ def deliver_digest(
             text=markdown,
             html=html,
         )
-        logger.info("Digest sent to %s", config.DIGEST_RECIPIENT)
+        log.info("Digest sent to %s", config.DIGEST_RECIPIENT)
         return True
     except (
         MessageRejectedError,
@@ -549,7 +552,7 @@ def deliver_digest(
         httpx.HTTPError,
         OSError,
     ) as e:
-        logger.error("Failed to send digest email: %s", e)
+        log.error("Failed to send digest email: %s", e)
         return False
 
 
@@ -565,7 +568,7 @@ def run_digest(dry_run: bool = False) -> None:
     # Check if already sent today
     state = State()
     if not dry_run and state.last_digest_date() == today:
-        logger.info("Digest already sent today (%s), skipping", today)
+        log.info("Digest already sent today (%s), skipping", today)
         return
 
     api_key = get_api_key()
@@ -574,7 +577,7 @@ def run_digest(dry_run: bool = False) -> None:
     # Step 1: Find recent transcripts
     transcripts = find_recent_transcripts(config.DIGEST_LOOKBACK_DAYS)
     if not transcripts:
-        logger.info("No recent transcripts found, nothing to digest")
+        log.info("No recent transcripts found, nothing to digest")
         return
 
     # Step 2: Extract quotes
@@ -585,17 +588,17 @@ def run_digest(dry_run: bool = False) -> None:
         total_cost += cost
 
     if not all_quotes:
-        logger.info("No quotes extracted, nothing to digest")
+        log.info("No quotes extracted, nothing to digest")
         return
 
-    logger.info("Total quotes extracted: %d", len(all_quotes))
+    log.info("Total quotes extracted: %d", len(all_quotes))
 
     # Step 3: Score against interest model
     scored_quotes, score_cost = score_quotes(all_quotes)
     total_cost += score_cost
 
     if not scored_quotes:
-        logger.info("No quotes above threshold (%.2f)", config.DIGEST_SCORE_THRESHOLD)
+        log.info("No quotes above threshold (%.2f)", config.DIGEST_SCORE_THRESHOLD)
         return
 
     # Step 4: Compose digest
@@ -603,7 +606,7 @@ def run_digest(dry_run: bool = False) -> None:
     total_cost += compose_cost
 
     if not body:
-        logger.error("Failed to compose digest")
+        log.error("Failed to compose digest")
         return
 
     # Step 5: Polish
@@ -625,7 +628,7 @@ def run_digest(dry_run: bool = False) -> None:
             cost_usd=total_cost,
         )
 
-    logger.info(
+    log.info(
         "Digest complete: %d hearings, %d quotes extracted, %d selected, $%.4f",
         len(transcripts),
         len(all_quotes),
