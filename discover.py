@@ -1186,12 +1186,17 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
         if not can_scrape and not is_senate:
             continue
         try:
-            pdf_urls = scrape_hearing_detail(
+            detail = scrape_hearing_detail(
                 hearing.committee_key, website_url, meta,
-                sources=hearing.sources,
             )
-            if pdf_urls:
-                hearing.sources["testimony_pdf_urls"] = pdf_urls
+            if detail.pdf_urls:
+                hearing.sources["testimony_pdf_urls"] = detail.pdf_urls
+            if detail.isvp_comm:
+                hearing.sources["isvp_comm"] = detail.isvp_comm
+                hearing.sources["isvp_filename"] = detail.isvp_filename
+            if detail.youtube_url and not hearing.sources.get("youtube_url"):
+                hearing.sources["youtube_url"] = detail.youtube_url
+                hearing.sources["youtube_id"] = detail.youtube_id
         except Exception as e:
             log.warning("PDF extraction failed for %s: %s", website_url, e)
 

@@ -13,7 +13,8 @@ mkdir -p "$LOG_DIR"
 # Activate venv
 source "$VENV/bin/activate"
 
-# Run the pipeline: 3-day lookback, default tier (<=2)
+# Run the pipeline: 3-day lookback, default tier (<=2).
+# --workers 1: serialized to avoid C-SPAN WAF captcha storms during unattended runs.
 cd "$PROJECT_DIR"
 python3 run.py --days 3 --workers 1 2>&1 | tee "$LOG_DIR/$(date +%Y-%m-%d).log"
 exit "${PIPESTATUS[0]}"

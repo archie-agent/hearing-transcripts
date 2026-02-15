@@ -5,13 +5,14 @@ provides per-platform extractors that parse the detail-page HTML and return
 a list of absolute PDF URLs suitable for download by extract.py.
 
 Main entry point:
-    scrape_hearing_detail(committee_key, detail_url, committee_meta) -> list[str]
+    scrape_hearing_detail(committee_key, detail_url, committee_meta) -> DetailResult
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
@@ -564,47 +565,54 @@ _EXTRACTOR_REGISTRY: dict[str, callable] = {
 #  Public API
 # ===========================================================================
 
+@dataclass
+class DetailResult:
+    """Result of scraping a hearing detail page."""
+
+    pdf_urls: list[str] = field(default_factory=list)
+    isvp_comm: str | None = None
+    isvp_filename: str | None = None
+    youtube_url: str | None = None
+    youtube_id: str | None = None
+
+
 def scrape_hearing_detail(
     committee_key: str,
     detail_url: str,
     committee_meta: dict,
-    sources: dict | None = None,
-) -> list[str]:
-    """Fetch a hearing detail page and extract testimony PDF URLs.
+) -> DetailResult:
+    """Fetch a hearing detail page and extract testimony PDFs + media sources.
 
-    Also checks for Senate ISVP video iframes.  When found, the ISVP
-    comm/filename parameters are written into *sources* (if provided) as
-    ``isvp_comm`` and ``isvp_filename``.
+    Returns a DetailResult with PDF URLs and any ISVP/YouTube params discovered
+    on the page.  The caller is responsible for merging these into hearing.sources.
 
     Args:
         committee_key: Dotted key like "senate.finance".
         detail_url: The hearing detail page URL (website_url from sources).
         committee_meta: Committee metadata dict from committees.json.
-        sources: Optional mutable dict; ISVP params are injected here when
-            an ISVP iframe is detected on the page.
 
     Returns:
-        List of absolute PDF URLs found on the detail page, or empty list.
+        DetailResult with pdf_urls, isvp_comm/filename, youtube_url/id.
     """
     if not detail_url:
-        return []
+        return DetailResult()
 
     # Fetch the detail page
     html = _fetch_detail_page(detail_url)
     if not html:
-        return []
+        return DetailResult()
 
-    # Determine the base URL (may differ from detail_url after redirects)
     base_url = detail_url
+    result = DetailResult()
 
     # -------------------------------------------------------------------
     # ISVP iframe detection (Senate committees only)
     # -------------------------------------------------------------------
-    if sources is not None and committee_meta.get("chamber") == "senate":
+    if committee_meta.get("chamber") == "senate":
         isvp_params = extract_isvp_url(html)
         if isvp_params:
-            sources["isvp_comm"] = isvp_params["comm"]
-            sources["isvp_filename"] = isvp_params["filename"]
+            result.isvp_comm = isvp_params["comm"]
+            result.isvp_filename = isvp_params["filename"]
             log.info(
                 "ISVP iframe detected for %s: comm=%s filename=%s",
                 committee_key, isvp_params["comm"], isvp_params["filename"],
@@ -613,42 +621,38 @@ def scrape_hearing_detail(
     # -------------------------------------------------------------------
     # YouTube embed detection (all committees)
     # -------------------------------------------------------------------
-    if sources is not None and not sources.get("youtube_url"):
-        yt_embeds = _extract_youtube_embeds(html)
-        if yt_embeds:
-            sources["youtube_url"] = yt_embeds[0]["youtube_url"]
-            sources["youtube_id"] = yt_embeds[0]["youtube_id"]
-            log.info("YouTube embed found for %s: %s", committee_key, yt_embeds[0]["youtube_id"])
+    yt_embeds = _extract_youtube_embeds(html)
+    if yt_embeds:
+        result.youtube_url = yt_embeds[0]["youtube_url"]
+        result.youtube_id = yt_embeds[0]["youtube_id"]
+        log.info("YouTube embed found for %s: %s", committee_key, yt_embeds[0]["youtube_id"])
 
     # -------------------------------------------------------------------
     # Testimony PDF extraction
     # -------------------------------------------------------------------
-    # Select the platform-specific extractor
     scraper_type = committee_meta.get("scraper_type", "")
     extractor = _EXTRACTOR_REGISTRY.get(scraper_type)
 
-    pdf_urls: list[str] = []
-
     if extractor:
-        pdf_urls = extractor(html, base_url)
+        result.pdf_urls = extractor(html, base_url)
         log.debug(
             "Extractor %s found %d PDFs on %s",
-            scraper_type, len(pdf_urls), detail_url,
+            scraper_type, len(result.pdf_urls), detail_url,
         )
 
     # If the platform extractor found nothing, try the generic fallback
-    if not pdf_urls:
-        pdf_urls = _extract_pdf_links(html, base_url)
-        if pdf_urls:
+    if not result.pdf_urls:
+        result.pdf_urls = _extract_pdf_links(html, base_url)
+        if result.pdf_urls:
             log.debug(
                 "Generic fallback found %d PDFs on %s",
-                len(pdf_urls), detail_url,
+                len(result.pdf_urls), detail_url,
             )
 
-    if pdf_urls:
+    if result.pdf_urls:
         log.info(
             "Found %d testimony PDFs for %s: %s",
-            len(pdf_urls), committee_key, detail_url,
+            len(result.pdf_urls), committee_key, detail_url,
         )
 
-    return pdf_urls
+    return result

@@ -223,7 +223,7 @@ def score_quotes(quotes: list[Quote]) -> tuple[list[Quote], float]:
     try:
         from interest_model.core import InterestModel
     except ImportError:
-        logger.error("interest_model not installed — skipping scoring, keeping all quotes")
+        logger.warning("interest_model not installed — skipping scoring, keeping all quotes")
         return quotes[:MAX_QUOTES], 0.0
 
     model = InterestModel()
