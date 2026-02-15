@@ -76,30 +76,7 @@ def _migrate_hearing_id(old_id: str, hearing: Hearing, state: State) -> None:
     new_id = hearing.id
     log.info("Migrating hearing ID: %s -> %s (%s)", old_id, new_id, hearing.title[:60])
 
-    conn = state._get_conn()
-    try:
-        # Copy processing_steps from old to new
-        conn.execute("""
-            INSERT OR IGNORE INTO processing_steps (hearing_id, step, status, started_at, completed_at, error)
-            SELECT ?, step, status, started_at, completed_at, error
-            FROM processing_steps WHERE hearing_id = ?
-        """, (new_id, old_id))
-
-        # Copy cspan_title_searches
-        conn.execute("""
-            INSERT OR IGNORE INTO cspan_title_searches (hearing_id, searched_at, found)
-            SELECT ?, searched_at, found
-            FROM cspan_title_searches WHERE hearing_id = ?
-        """, (new_id, old_id))
-
-        # Delete old rows
-        conn.execute("DELETE FROM processing_steps WHERE hearing_id = ?", (old_id,))
-        conn.execute("DELETE FROM cspan_title_searches WHERE hearing_id = ?", (old_id,))
-        conn.execute("DELETE FROM hearings WHERE id = ?", (old_id,))
-
-        conn.commit()
-    finally:
-        conn.close()
+    state.merge_hearing_id(old_id, new_id)
 
     # Rename transcript directory
     for committee_dir in config.TRANSCRIPTS_DIR.glob("*/"):

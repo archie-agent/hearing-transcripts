@@ -469,6 +469,40 @@ class State:
         conn.commit()
 
     # ------------------------------------------------------------------
+    # Hearing ID migration
+    # ------------------------------------------------------------------
+
+    def merge_hearing_id(self, old_id: str, new_id: str) -> None:
+        """Migrate all DB records from old_id to new_id.
+
+        Copies processing_steps and cspan_title_searches to new_id,
+        then deletes old_id records from all tables.
+        """
+        conn = self._get_conn()
+
+        # Copy processing_steps from old to new
+        conn.execute("""
+            INSERT OR IGNORE INTO processing_steps
+                (hearing_id, step, status, started_at, completed_at, error)
+            SELECT ?, step, status, started_at, completed_at, error
+            FROM processing_steps WHERE hearing_id = ?
+        """, (new_id, old_id))
+
+        # Copy cspan_title_searches
+        conn.execute("""
+            INSERT OR IGNORE INTO cspan_title_searches (hearing_id, searched_at, found)
+            SELECT ?, searched_at, found
+            FROM cspan_title_searches WHERE hearing_id = ?
+        """, (new_id, old_id))
+
+        # Delete old rows
+        conn.execute("DELETE FROM processing_steps WHERE hearing_id = ?", (old_id,))
+        conn.execute("DELETE FROM cspan_title_searches WHERE hearing_id = ?", (old_id,))
+        conn.execute("DELETE FROM hearings WHERE id = ?", (old_id,))
+
+        conn.commit()
+
+    # ------------------------------------------------------------------
     # Digest tracking
     # ------------------------------------------------------------------
 
