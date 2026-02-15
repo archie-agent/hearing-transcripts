@@ -563,7 +563,9 @@ _GOVINFO_NAME_MAP: dict[str, list[str]] = {}
 def _build_govinfo_map() -> None:
     """Build mapping from GovInfo package codes and name fragments to committee keys."""
     global _GOVINFO_CODE_MAP, _GOVINFO_NAME_MAP
-    for key, meta in config.COMMITTEES.items():
+    _GOVINFO_CODE_MAP.clear()
+    _GOVINFO_NAME_MAP.clear()
+    for key, meta in config.get_all_committees().items():
         code = meta.get("code", "")
         if code:
             _GOVINFO_CODE_MAP[code] = key
@@ -585,6 +587,9 @@ def _build_govinfo_map() -> None:
             if fragment:
                 _GOVINFO_NAME_MAP.setdefault(fragment, []).append(key)
 
+# Build at import time — committee data is always available
+_build_govinfo_map()
+
 
 def _map_govinfo_to_committee(title: str, chamber: str) -> str | None:
     """Try to extract a committee key from a GovInfo package title.
@@ -597,9 +602,6 @@ def _map_govinfo_to_committee(title: str, chamber: str) -> str | None:
 
     Returns the committee_key if a match is found, None otherwise.
     """
-    if not _GOVINFO_NAME_MAP:
-        _build_govinfo_map()
-
     title_upper = title.upper()
 
     # Try to find "COMMITTEE ON <name>" pattern first
@@ -648,12 +650,9 @@ def _fetch_govinfo_committee(package_id: str) -> str | None:
 
     Returns the committee_key if found, None otherwise.
     """
-    if not _GOVINFO_NAME_MAP:
-        _build_govinfo_map()
-
     url = (
         f"https://api.govinfo.gov/packages/{package_id}/summary"
-        f"?api_key={config.GOVINFO_API_KEY}"
+        f"?api_key={config.get_govinfo_api_key()}"
     )
     resp = _http_get(url, timeout=20)
     if not resp:
@@ -701,12 +700,12 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
     metadata and meeting status. The API's systemCode matches our committee
     'code' field (e.g., 'ssbk00' for Senate Banking).
     """
-    api_key = config.CONGRESS_API_KEY
+    api_key = config.get_congress_api_key()
     congress = config.CONGRESS
 
     # Build reverse lookup: {systemCode: committee_key}
     code_to_key: dict[str, str] = {}
-    for key, meta in config.COMMITTEES.items():
+    for key, meta in config.get_all_committees().items():
         code = meta.get("code", "")
         if code:
             code_to_key[code] = key
@@ -719,6 +718,9 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
     from_dt = cutoff.strftime("%Y-%m-%dT00:00:00Z")
 
     hearings: list[Hearing] = []
+
+    # Phase 1: Collect all meeting URLs from listing endpoints
+    pending_details: list[tuple[str, str]] = []  # (event_id, detail_url)
 
     for chamber in ("house", "senate"):
         offset = 0
@@ -748,102 +750,11 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
                 if not event_id or not detail_url:
                     continue
 
-                # Fetch detail endpoint for full metadata
+                # Build detail endpoint URL
                 if "api_key=" not in detail_url:
                     detail_url += f"&api_key={api_key}" if "?" in detail_url else f"?api_key={api_key}"
                 detail_url += "&format=json" if "format=" not in detail_url else ""
-
-                detail_resp = _http_get(detail_url, timeout=20)
-                if not detail_resp:
-                    continue
-
-                try:
-                    detail = detail_resp.json()
-                except (json.JSONDecodeError, ValueError):
-                    continue
-
-                # The detail may be nested under a key or at top level
-                meeting_detail = detail.get("committeeMeeting", detail)
-
-                # Skip canceled/postponed meetings
-                status = meeting_detail.get("meetingStatus", "")
-                if status in ("Canceled", "Postponed"):
-                    log.debug("  Skipping %s meeting %s: %s", chamber, event_id, status)
-                    continue
-
-                title = (meeting_detail.get("title") or "").strip()
-                if not title or len(title) < 5:
-                    continue
-
-                # Parse date
-                date_str = meeting_detail.get("date", "")
-                if not date_str:
-                    continue
-                # date is typically ISO format like "2026-02-05T15:00:00Z"
-                try:
-                    date_formatted = date_str[:10]  # YYYY-MM-DD
-                    meeting_date = datetime.strptime(date_formatted, "%Y-%m-%d")
-                    if meeting_date < cutoff:
-                        continue
-                    # Skip future placeholder entries (date > 30 days out)
-                    if meeting_date > datetime.now() + timedelta(days=30):
-                        continue
-                except (ValueError, IndexError):
-                    continue
-
-                # Extract systemCode from committees list.
-                # systemCode can be a subcommittee code like "hsif16" --
-                # try exact match first, then parent committee (first 4 chars + "00").
-                committee_key = None
-                committees_list = meeting_detail.get("committees", [])
-                for comm in committees_list:
-                    sys_code = comm.get("systemCode", "")
-                    if not sys_code:
-                        continue
-                    if sys_code in code_to_key:
-                        committee_key = code_to_key[sys_code]
-                        break
-                    # Try parent committee code (e.g., hsif16 -> hsif00)
-                    parent_code = sys_code[:4] + "00"
-                    if parent_code in code_to_key:
-                        committee_key = code_to_key[parent_code]
-                        break
-
-                if not committee_key:
-                    log.debug("  No matching committee for meeting %s: %s",
-                              event_id, title[:60])
-                    continue
-
-                committee_meta = config.COMMITTEES.get(committee_key, {})
-                committee_name = committee_meta.get("name", committee_key)
-
-                # Extract witnesses
-                witnesses = []
-                for w in meeting_detail.get("witnesses", []):
-                    witness_info = {}
-                    if w.get("name"):
-                        witness_info["name"] = w["name"]
-                    if w.get("position"):
-                        witness_info["position"] = w["position"]
-                    if w.get("organization"):
-                        witness_info["organization"] = w["organization"]
-                    if witness_info:
-                        witnesses.append(witness_info)
-
-                sources: dict = {"congress_api_event_id": event_id}
-                if witnesses:
-                    sources["witnesses"] = witnesses
-
-                hearings.append(Hearing(
-                    committee_key=committee_key,
-                    committee_name=committee_name,
-                    title=title,
-                    date=date_formatted,
-                    sources=sources,
-                    source_authority=4,
-                ))
-                log.debug("  congress.gov: %s %s %s", date_formatted,
-                          committee_key, title[:60])
+                pending_details.append((event_id, detail_url))
 
             # Pagination
             pagination = data.get("pagination", {})
@@ -852,14 +763,119 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
             else:
                 break
 
+    if not pending_details:
+        log.info("congress.gov API: 0 meetings found")
+        return []
+
+    log.info("congress.gov API: fetching %d meeting details", len(pending_details))
+
+    # Phase 2: Fetch details in parallel (rate limiter prevents flooding)
+    def _fetch_detail(item: tuple[str, str]) -> Hearing | None:
+        event_id, detail_url = item
+        detail_resp = _http_get(detail_url, timeout=20)
+        if not detail_resp:
+            return None
+
+        try:
+            detail = detail_resp.json()
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+        # The detail may be nested under a key or at top level
+        meeting_detail = detail.get("committeeMeeting", detail)
+
+        # Skip canceled/postponed meetings
+        status = meeting_detail.get("meetingStatus", "")
+        if status in ("Canceled", "Postponed"):
+            log.debug("  Skipping meeting %s: %s", event_id, status)
+            return None
+
+        title = (meeting_detail.get("title") or "").strip()
+        if not title or len(title) < 5:
+            return None
+
+        # Parse date
+        date_str = meeting_detail.get("date", "")
+        if not date_str:
+            return None
+        # date is typically ISO format like "2026-02-05T15:00:00Z"
+        try:
+            date_formatted = date_str[:10]  # YYYY-MM-DD
+            meeting_date = datetime.strptime(date_formatted, "%Y-%m-%d")
+            if meeting_date < cutoff:
+                return None
+            # Skip future placeholder entries (date > 30 days out)
+            if meeting_date > datetime.now() + timedelta(days=30):
+                return None
+        except (ValueError, IndexError):
+            return None
+
+        # Extract systemCode from committees list.
+        # systemCode can be a subcommittee code like "hsif16" --
+        # try exact match first, then parent committee (first 4 chars + "00").
+        committee_key = None
+        committees_list = meeting_detail.get("committees", [])
+        for comm in committees_list:
+            sys_code = comm.get("systemCode", "")
+            if not sys_code:
+                continue
+            if sys_code in code_to_key:
+                committee_key = code_to_key[sys_code]
+                break
+            # Try parent committee code (e.g., hsif16 -> hsif00)
+            parent_code = sys_code[:4] + "00"
+            if parent_code in code_to_key:
+                committee_key = code_to_key[parent_code]
+                break
+
+        if not committee_key:
+            log.debug("  No matching committee for meeting %s: %s",
+                      event_id, title[:60])
+            return None
+
+        committee_meta = config.get_all_committees().get(committee_key, {})
+        committee_name = committee_meta.get("name", committee_key)
+
+        # Extract witnesses
+        witnesses = []
+        for w in meeting_detail.get("witnesses", []):
+            witness_info = {}
+            if w.get("name"):
+                witness_info["name"] = w["name"]
+            if w.get("position"):
+                witness_info["position"] = w["position"]
+            if w.get("organization"):
+                witness_info["organization"] = w["organization"]
+            if witness_info:
+                witnesses.append(witness_info)
+
+        sources: dict = {"congress_api_event_id": event_id}
+        if witnesses:
+            sources["witnesses"] = witnesses
+
+        log.debug("  congress.gov: %s %s %s", date_formatted,
+                  committee_key, title[:60])
+
+        return Hearing(
+            committee_key=committee_key,
+            committee_name=committee_name,
+            title=title,
+            date=date_formatted,
+            sources=sources,
+            source_authority=4,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for result in pool.map(_fetch_detail, pending_details):
+            if result is not None:
+                hearings.append(result)
+
     log.info("congress.gov API: %d hearings discovered", len(hearings))
     return hearings
 
 
 def discover_govinfo(days: int = 7) -> list[Hearing]:
     """Poll GovInfo API for recently published hearing transcripts."""
-    if not _GOVINFO_CODE_MAP:
-        _build_govinfo_map()
 
     fetch_details = os.environ.get("GOVINFO_FETCH_DETAILS", "false").lower() == "true"
 
@@ -867,7 +883,7 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
     url = (
         f"https://api.govinfo.gov/collections/CHRG/{cutoff}"
         f"?offsetMark=*&pageSize=100&congress={config.CONGRESS}"
-        f"&api_key={config.GOVINFO_API_KEY}"
+        f"&api_key={config.get_govinfo_api_key()}"
     )
 
     resp = _http_get(url, timeout=30)
@@ -1214,6 +1230,12 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
        dates often differ from the actual hearing date by one day.
     """
     merged: dict[str, Hearing] = {}
+    # Index by (committee_key, date) for O(1) group lookups
+    by_key_date: dict[tuple[str, str], list[Hearing]] = {}
+
+    def _register(h: Hearing, dedup_key: str) -> None:
+        merged[dedup_key] = h
+        by_key_date.setdefault((h.committee_key, h.date), []).append(h)
 
     for h in hearings:
         # Dedup key includes normalized title prefix to handle same-day hearings
@@ -1231,11 +1253,8 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
         else:
             # Fuzzy fallback: check if any existing hearing for the same
             # committee+date is similar enough to merge
-            group_prefix = f"{h.committee_key}:{h.date}:"
             fuzzy_match = None
-            for key, existing in merged.items():
-                if not key.startswith(group_prefix):
-                    continue
+            for existing in by_key_date.get((h.committee_key, h.date), []):
                 if _title_similarity(h.title, existing.title) >= 0.30:
                     fuzzy_match = existing
                     break
@@ -1246,10 +1265,7 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
             if not fuzzy_match:
                 for offset in (-1, 1):
                     adj_date = _adjacent_date(h.date, offset)
-                    adj_prefix = f"{h.committee_key}:{adj_date}:"
-                    for key, existing in merged.items():
-                        if not key.startswith(adj_prefix):
-                            continue
+                    for existing in by_key_date.get((h.committee_key, adj_date), []):
                         # Only do adjacent-date merge when YouTube is involved
                         if not (_has_youtube_source(h) or _has_youtube_source(existing)):
                             continue
@@ -1273,7 +1289,7 @@ def _deduplicate(hearings: list[Hearing]) -> list[Hearing]:
                 elif h.source_authority == fuzzy_match.source_authority and len(h.title) > len(fuzzy_match.title):
                     fuzzy_match.title = h.title
             else:
-                merged[dedup_key] = h
+                _register(h, dedup_key)
 
     return list(merged.values())
 
