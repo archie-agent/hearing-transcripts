@@ -1,10 +1,5 @@
 """Tests for transcribe.py — VTT-to-text conversion."""
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from transcribe import _vtt_to_text
 
 

@@ -1,10 +1,7 @@
 """Tests for state.py — SQLite persistence layer."""
 
-import sys
 import tempfile
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from state import State
 

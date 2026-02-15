@@ -1,10 +1,5 @@
 """Tests for discover.py — dedup logic and Hearing dataclass."""
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from discover import (
     Hearing,
     _cross_committee_dedup,

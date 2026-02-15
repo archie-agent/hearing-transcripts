@@ -1,6 +1,14 @@
-"""Pytest configuration: register custom markers and default filtering."""
+"""Pytest configuration: register custom markers, default filtering, and path setup."""
+
+import sys
+from pathlib import Path
 
 import pytest
+
+# Add project root to sys.path so tests can import modules without per-file boilerplate.
+_PROJECT_ROOT = str(Path(__file__).parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 
 def pytest_configure(config):

@@ -12,16 +12,10 @@ still return structurally valid results.
 from __future__ import annotations
 
 import re
-import sys
 from datetime import datetime, timedelta
-from pathlib import Path
-
-import pytest
-
-# Ensure project root is importable.
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import httpx
+import pytest
 from discover import Hearing, discover_youtube
 from scrapers import ScrapedHearing, parse_date, scrape_website
 

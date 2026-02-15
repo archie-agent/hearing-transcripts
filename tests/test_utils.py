@@ -1,10 +1,5 @@
 """Tests for utils.py — title normalization, hearing ID, congress calculation."""
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from utils import hearing_id, normalize_title
 from config import current_congress
 

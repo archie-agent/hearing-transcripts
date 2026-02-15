@@ -1,11 +1,5 @@
 """Tests for detail_scraper.py -- per-platform testimony PDF extraction."""
 
-import sys
-from pathlib import Path
-
-# Ensure project root is on path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from detail_scraper import (
     _abs_url,
     _extract_coldfusion,

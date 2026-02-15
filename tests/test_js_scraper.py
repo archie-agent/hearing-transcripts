@@ -1,12 +1,7 @@
 """Tests for JS-rendered page scraping via Chrome CDP."""
 
-import sys
 from datetime import datetime, timedelta
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-# Ensure project root is on path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scrapers import (
     ScrapedHearing,

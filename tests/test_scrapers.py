@@ -1,13 +1,9 @@
 """Tests for scrapers.py — date parsing and HTML scraper functions."""
 
-import sys
 from datetime import datetime, timedelta
-from pathlib import Path
-
-# Ensure project root is on path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scrapers import (
+    SCRAPER_REGISTRY,
     ScrapedHearing,
     _is_plausible_hearing_date,
     parse_date,
@@ -17,6 +13,7 @@ from scrapers import (
     scrape_new_senate_cms,
     scrape_wordpress_single_event,
 )
+from detail_scraper import _EXTRACTOR_REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -261,3 +258,18 @@ class TestNewSenateCms:
         assert len(results) == 1
         assert "Nominations" in results[0].title
         assert results[0].date == "2026-02-08"
+
+
+class TestRegistryGuard:
+    """Ensure scraper and extractor registries stay in sync."""
+
+    # generic_links intentionally has no extractor (falls through to generic)
+    _SCRAPER_ONLY = {"generic_links"}
+
+    def test_extractor_covers_all_scraper_types(self):
+        missing = set(SCRAPER_REGISTRY) - set(_EXTRACTOR_REGISTRY) - self._SCRAPER_ONLY
+        assert not missing, f"Scraper types without extractor entries: {missing}"
+
+    def test_no_orphan_extractors(self):
+        orphan = set(_EXTRACTOR_REGISTRY) - set(SCRAPER_REGISTRY)
+        assert not orphan, f"Extractor types with no matching scraper: {orphan}"
