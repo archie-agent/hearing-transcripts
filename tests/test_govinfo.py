@@ -2,6 +2,7 @@
 
 import json
 import os
+from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 from discover import (
@@ -10,6 +11,9 @@ from discover import (
     _map_govinfo_to_committee,
     discover_govinfo,
 )
+
+# Dynamic date for tests — recent enough to pass date_floor filtering
+_RECENT_DATE = (date.today() - timedelta(days=7)).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +114,7 @@ class TestDiscoverGovInfoFallback:
     def test_mapped_title_uses_committee_key(self, mock_get):
         mock_get.return_value = self._make_response([{
             "packageId": "CHRG-119hhrg12345",
-            "dateIssued": "2026-02-01",
+            "dateIssued": _RECENT_DATE,
             "title": "HEARING BEFORE THE COMMITTEE ON WAYS AND MEANS",
         }])
         hearings = discover_govinfo(days=7)
@@ -122,7 +126,7 @@ class TestDiscoverGovInfoFallback:
     def test_unmapped_title_falls_back_to_generic_house(self, mock_get):
         mock_get.return_value = self._make_response([{
             "packageId": "CHRG-119hhrg99999",
-            "dateIssued": "2026-02-01",
+            "dateIssued": _RECENT_DATE,
             "title": "NOMINATIONS",
         }])
         hearings = discover_govinfo(days=7)
@@ -134,7 +138,7 @@ class TestDiscoverGovInfoFallback:
     def test_unmapped_title_falls_back_to_generic_senate(self, mock_get):
         mock_get.return_value = self._make_response([{
             "packageId": "CHRG-119shrg88888",
-            "dateIssued": "2026-02-01",
+            "dateIssued": _RECENT_DATE,
             "title": "NOMINATIONS",
         }])
         hearings = discover_govinfo(days=7)
@@ -147,12 +151,12 @@ class TestDiscoverGovInfoFallback:
         mock_get.return_value = self._make_response([
             {
                 "packageId": "CHRG-119shrg11111",
-                "dateIssued": "2026-02-01",
+                "dateIssued": _RECENT_DATE,
                 "title": "HEARING BEFORE THE COMMITTEE ON FINANCE--UNITED STATES SENATE",
             },
             {
                 "packageId": "CHRG-119shrg22222",
-                "dateIssued": "2026-02-02",
+                "dateIssued": _RECENT_DATE,
                 "title": "EXECUTIVE SESSION",
             },
         ])
@@ -165,7 +169,7 @@ class TestDiscoverGovInfoFallback:
     def test_govinfo_package_id_in_sources(self, mock_get):
         mock_get.return_value = self._make_response([{
             "packageId": "CHRG-119hhrg55555",
-            "dateIssued": "2026-01-15",
+            "dateIssued": _RECENT_DATE,
             "title": "HEARING BEFORE THE COMMITTEE ON THE BUDGET",
         }])
         hearings = discover_govinfo(days=7)
@@ -235,7 +239,7 @@ class TestFetchGovInfoCommittee:
         mock_get.return_value = MagicMock()
         mock_get.return_value.json.return_value = {"packages": [{
             "packageId": "CHRG-119shrg77777",
-            "dateIssued": "2026-02-01",
+            "dateIssued": _RECENT_DATE,
             "title": "NOMINATIONS",
         }]}
         # Ensure env var is not set
@@ -253,7 +257,7 @@ class TestFetchGovInfoCommittee:
         collections_resp = MagicMock()
         collections_resp.json.return_value = {"packages": [{
             "packageId": "CHRG-119shrg77777",
-            "dateIssued": "2026-02-01",
+            "dateIssued": _RECENT_DATE,
             "title": "NOMINATIONS",
         }]}
         summary_resp = MagicMock()

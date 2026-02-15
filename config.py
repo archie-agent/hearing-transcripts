@@ -25,15 +25,29 @@ DATA_DIR = ROOT / "data"
 COMMITTEES_JSON = DATA_DIR / "committees.json"
 
 # ---------------------------------------------------------------------------
-# API keys (inherited from environment / ~/.env)
+# API keys — read from environment each call so tests / late-set vars work
 # ---------------------------------------------------------------------------
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-GOVINFO_API_KEY = os.environ.get("GOVINFO_API_KEY", "DEMO_KEY")
-CONGRESS_API_KEY = os.environ.get("CONGRESS_API_KEY", GOVINFO_API_KEY)
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
-if GOVINFO_API_KEY == "DEMO_KEY":
+def get_openai_api_key() -> str:
+    return os.environ.get("OPENAI_API_KEY", "")
+
+def get_govinfo_api_key() -> str:
+    return os.environ.get("GOVINFO_API_KEY", "DEMO_KEY")
+
+def get_congress_api_key() -> str:
+    return os.environ.get("CONGRESS_API_KEY", get_govinfo_api_key())
+
+def get_openrouter_api_key() -> str:
+    return os.environ.get("OPENROUTER_API_KEY", "")
+
+if get_govinfo_api_key() == "DEMO_KEY":
     log.warning("Using GovInfo DEMO_KEY (40 req/min, 1000/hr). Register free at api.data.gov")
+
+# Backward-compatible module-level constants (read once at import time)
+OPENAI_API_KEY = get_openai_api_key()
+GOVINFO_API_KEY = get_govinfo_api_key()
+CONGRESS_API_KEY = get_congress_api_key()
+OPENROUTER_API_KEY = get_openrouter_api_key()
 
 # ---------------------------------------------------------------------------
 # Model choices — single place to change LLM/transcription models
@@ -92,13 +106,26 @@ def _load_committees() -> dict[str, dict]:
         raise ValueError(f"committees.json is corrupt: {e}") from e
     return data.get("committees", {})
 
-# Global committee registry. Keyed by "chamber.slug" (e.g., "house.ways_and_means").
-COMMITTEES: dict[str, dict] = _load_committees()
+# Lazy-loaded committee registry — avoids reading JSON at import time
+_committees_cache: dict[str, dict] | None = None
+
+
+def get_all_committees() -> dict[str, dict]:
+    """Return the full committee registry, loading from JSON on first call."""
+    global _committees_cache
+    if _committees_cache is None:
+        _committees_cache = _load_committees()
+    return _committees_cache
+
+
+# Backward-compatible module-level constant (property not possible at module level,
+# so this reads once at import time for existing callers).
+COMMITTEES: dict[str, dict] = get_all_committees()
 
 
 def get_committees(max_tier: int = 99) -> dict[str, dict]:
     """Return committees filtered by tier. Tier 1 = core economics, 2 = adjacent, 3 = peripheral."""
-    return {k: v for k, v in COMMITTEES.items() if v.get("tier", 3) <= max_tier}
+    return {k: v for k, v in get_all_committees().items() if v.get("tier", 3) <= max_tier}
 
 
 # ---------------------------------------------------------------------------
@@ -113,4 +140,4 @@ DIGEST_LOOKBACK_DAYS = int(os.environ.get("DIGEST_LOOKBACK_DAYS", "4"))
 
 def get_committee_meta(key: str) -> dict | None:
     """Look up committee info by dotted key like 'house.judiciary'."""
-    return COMMITTEES.get(key)
+    return get_all_committees().get(key)
