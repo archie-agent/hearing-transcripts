@@ -6,9 +6,9 @@ import logging
 import re
 from datetime import datetime, timedelta
 from typing import Callable, NamedTuple
-from urllib.parse import urljoin
-
 from bs4 import BeautifulSoup, Tag
+
+from utils import abs_url as _abs_url
 
 log = logging.getLogger(__name__)
 
@@ -98,13 +98,6 @@ def _is_recent(date_str: str, cutoff: datetime) -> bool:
         return dt >= cutoff
     except ValueError:
         return False
-
-
-def _abs_url(href: str, base_url: str) -> str:
-    """Convert a relative URL to absolute using the base URL."""
-    if href.startswith("http"):
-        return href
-    return urljoin(base_url, href)
 
 
 # ---------------------------------------------------------------------------
@@ -375,9 +368,11 @@ def scrape_wordpress_elementor(html: str, base_url: str, cutoff: datetime) -> li
 # time[datetime] elements near links
 # ---------------------------------------------------------------------------
 
-def scrape_evo_framework(html: str, base_url: str, cutoff: datetime) -> list[ScrapedHearing]:
+def scrape_evo_framework(html: str, base_url: str, cutoff: datetime,
+                         soup: BeautifulSoup | None = None) -> list[ScrapedHearing]:
     """Parse Drupal evo-framework sites with time[datetime] elements."""
-    soup = BeautifulSoup(html, "lxml")
+    if soup is None:
+        soup = BeautifulSoup(html, "lxml")
     results = []
     seen_urls = set()
 
@@ -463,7 +458,7 @@ def scrape_html_table(html: str, base_url: str, cutoff: datetime) -> list[Scrape
     results = []
 
     # Also try time[datetime] elements first (Budget has both table and time elements)
-    evo_results = scrape_evo_framework(html, base_url, cutoff)
+    evo_results = scrape_evo_framework(html, base_url, cutoff, soup=soup)
     if evo_results:
         return evo_results
 

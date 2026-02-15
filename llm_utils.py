@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 import httpx
@@ -21,15 +20,11 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 def get_api_key() -> str:
-    """Get OpenRouter API key from environment (loaded by config.py via load_dotenv).
+    """Get OpenRouter API key from environment.
 
-    Returns:
-        API key string
-
-    Raises:
-        ValueError: If API key cannot be found
+    Delegates to config.get_openrouter_api_key() and raises ValueError if empty.
     """
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    api_key = config.get_openrouter_api_key()
     if api_key:
         return api_key
 

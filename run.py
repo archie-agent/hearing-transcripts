@@ -31,7 +31,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import config
-from discover import Hearing, discover_all, title_similarity
+from discover import Hearing, discover_all
+from utils import title_similarity
 from extract import fetch_govinfo_transcript, process_testimony_pdfs
 from alerts import check_and_alert
 from state import State

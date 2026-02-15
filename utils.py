@@ -5,6 +5,7 @@ import re
 import sys
 import time
 from threading import Lock
+from urllib.parse import urljoin
 
 import httpx
 
@@ -89,3 +90,24 @@ def normalize_title(title: str) -> str:
         title = pattern.sub("", title)
     words = TITLE_CLEAN_RE.sub("", title.lower()).split()[:8]
     return " ".join(words)
+
+
+def abs_url(href: str, base_url: str) -> str:
+    """Resolve a potentially relative URL against a base URL.
+
+    Returns empty string for non-URL hrefs (fragments, javascript:, mailto:).
+    """
+    if not href or href.startswith(("#", "javascript:", "mailto:")):
+        return ""
+    if href.startswith("http"):
+        return href
+    return urljoin(base_url, href)
+
+
+def title_similarity(title_a: str, title_b: str) -> float:
+    """Jaccard similarity of word tokens between two titles."""
+    words_a = set(TITLE_CLEAN_RE.sub("", title_a.lower()).split())
+    words_b = set(TITLE_CLEAN_RE.sub("", title_b.lower()).split())
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)

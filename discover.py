@@ -21,7 +21,10 @@ import httpx
 import config
 import scrapers
 from detail_scraper import scrape_hearing_detail
-from utils import TITLE_CLEAN_RE, TITLE_STOPWORDS, USER_AGENT, RateLimiter, YT_DLP_ENV, normalize_title
+from utils import (
+    TITLE_CLEAN_RE, TITLE_STOPWORDS, USER_AGENT,
+    RateLimiter, YT_DLP_ENV, normalize_title, title_similarity,
+)
 
 log = logging.getLogger(__name__)
 
@@ -527,6 +530,16 @@ def discover_website(committee_key: str, meta: dict, days: int = 1) -> list[Hear
 # GovInfo API discovery (official GPO transcripts)
 # ---------------------------------------------------------------------------
 
+def _chamber_from_package_id(package_id: str) -> str:
+    """Detect chamber (house/senate/unknown) from a GovInfo package ID."""
+    pkg_lower = package_id.lower()
+    if "hhrg" in pkg_lower:
+        return "house"
+    if "shrg" in pkg_lower:
+        return "senate"
+    return "unknown"
+
+
 # Map GovInfo committee codes to our committee keys
 _GOVINFO_CODE_MAP: dict[str, str] = {}
 
@@ -640,15 +653,9 @@ def _fetch_govinfo_committee(package_id: str) -> str | None:
         log.warning("GovInfo summary for %s returned non-JSON: %s", package_id, e)
         return None
 
-    # Detect chamber from packageId
-    pkg_lower = package_id.lower()
-    if "hhrg" in pkg_lower:
-        chamber = "house"
-    elif "shrg" in pkg_lower:
-        chamber = "senate"
-    else:
+    chamber = _chamber_from_package_id(package_id)
+    if chamber == "unknown":
         log.warning("Unknown chamber for GovInfo package %s", package_id)
-        chamber = "unknown"
 
     # Check for "committees" field in the summary JSON
     committees = data.get("committees", [])
@@ -882,13 +889,7 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
         if date_issued < date_floor:
             continue
 
-        # Detect chamber from package ID
-        if "hhrg" in pkg_id.lower():
-            chamber = "house"
-        elif "shrg" in pkg_id.lower():
-            chamber = "senate"
-        else:
-            chamber = "unknown"
+        chamber = _chamber_from_package_id(pkg_id)
 
         # Step 1: Try title-based mapping (no extra API calls)
         committee_key = _map_govinfo_to_committee(title, chamber)
@@ -1325,16 +1326,6 @@ def _merge_adjacent_date_pairs(hearings: list[Hearing]) -> list[Hearing]:
 # ---------------------------------------------------------------------------
 
 _CROSS_DEDUP_THRESHOLD = 0.4
-
-
-def title_similarity(title_a: str, title_b: str) -> float:
-    """Jaccard similarity of word tokens between two titles."""
-    words_a = set(TITLE_CLEAN_RE.sub("", title_a.lower()).split())
-    words_b = set(TITLE_CLEAN_RE.sub("", title_b.lower()).split())
-    if not words_a or not words_b:
-        return 0.0
-    return len(words_a & words_b) / len(words_a | words_b)
-
 
 
 def _chamber_from_key(committee_key: str) -> str:

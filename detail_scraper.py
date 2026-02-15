@@ -14,13 +14,13 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup, Tag
 
 from isvp import extract_isvp_url
-from utils import RateLimiter, get_http_client
+from utils import RateLimiter, abs_url as _abs_url, get_http_client
 
 log = logging.getLogger(__name__)
 
@@ -82,15 +82,6 @@ def _extract_youtube_embeds(html: str) -> list[dict]:
                 "youtube_url": f"https://www.youtube.com/watch?v={vid_id}",
             })
     return results
-
-
-def _abs_url(href: str, base_url: str) -> str:
-    """Resolve a potentially relative URL against a base URL."""
-    if not href or href.startswith(("#", "javascript:", "mailto:")):
-        return ""
-    if href.startswith("http"):
-        return href
-    return urljoin(base_url, href)
 
 
 def _is_pdf_href(href: str) -> bool:
