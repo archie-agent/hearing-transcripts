@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import sys
@@ -60,49 +59,32 @@ class RateLimiter:
             self._last_request[domain] = time.time()
 
 
-def hearing_id(committee_key: str, date: str, title: str) -> str:
-    """Generate a stable ID for a hearing from its key fields.
-    Uses first 12 chars of SHA256 of normalized (committee_key, date, title_prefix).
-    """
-    # Normalize title for consistent hashing
-    title_normalized = normalize_title(title)
-
-    # Create hash input
-    hash_input = f"{committee_key}|{date}|{title_normalized}"
-
-    # Generate SHA256 and return first 12 characters
-    hash_digest = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
-    return hash_digest[:12]
-
-
-# Pre-compiled patterns for normalize_title
-_TITLE_PREFIX_RES = [
-    re.compile(prefix, re.IGNORECASE)
-    for prefix in [
-        r"^full committee hearing:\s*",
-        r"^hearing notice:\s*",
-        r"^subcommittee hearing:\s*",
-        r"^markup:\s*",
-        r"^business meeting:\s*",
-        r"^hearing:\s*",
-        r"^notice:\s*",
-    ]
+# Pre-compiled patterns for normalize_title — comprehensive set covering all
+# prefix formats seen from YouTube, websites, GovInfo, and congress.gov.
+_TITLE_STRIP_RES = [
+    re.compile(r"^HEARING NOTICE:?\s*", re.IGNORECASE),
+    re.compile(r"^Hearing\s+Entitled:?\s*", re.IGNORECASE),
+    re.compile(r"^Oversight\s+Hearing\s*[-:]\s*", re.IGNORECASE),
+    re.compile(r"^Hearings?\s*:?\s*", re.IGNORECASE),
+    re.compile(r"^(Full Committee |Subcommittee )?Hearing:?\s*", re.IGNORECASE),
+    re.compile(r"^[\w&]+\s+Hearing:?\s*", re.IGNORECASE),
+    re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}\s*"),
+    re.compile(r"^\*+[A-Z\s]+\*+\s*"),
+    re.compile(r"^Upcoming\s*:?\s*", re.IGNORECASE),
+    re.compile(r"^(An? )?(Oversight )?Hearing[s]?\s+to\s+(examine|consider)\s+", re.IGNORECASE),
+    re.compile(r"\s+(Location|Time):.*$", re.IGNORECASE),
+    re.compile(r"WASHINGTON,?\s*D\.?C\.?\s*[-–—].*$", re.IGNORECASE),
 ]
-_PUNCT_RE = re.compile(r"[^\w\s]")
-_MULTI_SPACE_RE = re.compile(r"\s+")
+_TITLE_CLEAN_RE = re.compile(r"[^a-z0-9\s]")
 
 
 def normalize_title(title: str) -> str:
-    """Normalize a hearing title for comparison.
+    """Normalize a hearing title for comparison/dedup.
+
     Strips common prefixes ('Full Committee Hearing:', 'HEARING NOTICE:', etc.),
     lowercases, removes punctuation, returns first 8 words.
     """
-    normalized = title.lower()
-    for pattern in _TITLE_PREFIX_RES:
-        normalized = pattern.sub("", normalized)
-
-    normalized = _PUNCT_RE.sub(" ", normalized)
-    normalized = _MULTI_SPACE_RE.sub(" ", normalized).strip()
-
-    words = normalized.split()
-    return " ".join(words[:8])
+    for pattern in _TITLE_STRIP_RES:
+        title = pattern.sub("", title)
+    words = _TITLE_CLEAN_RE.sub("", title.lower()).split()[:8]
+    return " ".join(words)

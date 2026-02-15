@@ -6,7 +6,7 @@ from discover import (
     _deduplicate,
     _merge_adjacent_date_pairs,
     _normalize_title,
-    _title_similarity,
+    title_similarity,
 )
 
 
@@ -91,18 +91,18 @@ class TestDeduplicate:
 
 class TestTitleSimilarity:
     def test_identical_titles(self):
-        sim = _title_similarity("Federal Reserve Monetary Policy", "Federal Reserve Monetary Policy")
+        sim = title_similarity("Federal Reserve Monetary Policy", "Federal Reserve Monetary Policy")
         assert sim == 1.0
 
     def test_completely_different(self):
-        sim = _title_similarity("Federal Reserve Monetary Policy", "Immigration Border Security")
+        sim = title_similarity("Federal Reserve Monetary Policy", "Immigration Border Security")
         assert sim == 0.0
 
     def test_partial_overlap(self):
         # "federal reserve monetary policy" vs "monetary policy and the state of the economy"
         # intersection: {monetary, policy} = 2
         # union: {federal, reserve, monetary, policy, and, the, state, of, economy} = 9
-        sim = _title_similarity(
+        sim = title_similarity(
             "Full Committee Hearing: Federal Reserve Monetary Policy",
             "MONETARY POLICY AND THE STATE OF THE ECONOMY",
         )
@@ -110,13 +110,13 @@ class TestTitleSimilarity:
         assert sim < 1.0
 
     def test_empty_title(self):
-        assert _title_similarity("", "some title") == 0.0
-        assert _title_similarity("some title", "") == 0.0
-        assert _title_similarity("", "") == 0.0
+        assert title_similarity("", "some title") == 0.0
+        assert title_similarity("some title", "") == 0.0
+        assert title_similarity("", "") == 0.0
 
     def test_punctuation_stripped(self):
         # Punctuation should not affect similarity
-        sim1 = _title_similarity("Budget, Fiscal Year 2026", "Budget Fiscal Year 2026")
+        sim1 = title_similarity("Budget, Fiscal Year 2026", "Budget Fiscal Year 2026")
         assert sim1 == 1.0
 
 

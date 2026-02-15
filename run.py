@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import config
-from discover import Hearing, discover_all, _title_similarity
+from discover import Hearing, discover_all, title_similarity
 from extract import fetch_govinfo_transcript, process_testimony_pdfs
 from alerts import check_and_alert
 from state import State
@@ -63,7 +63,7 @@ def _reconcile_hearing_id(hearing: Hearing, state: State) -> str | None:
     for candidate in candidates:
         if candidate["id"] == new_id:
             continue
-        if _title_similarity(hearing.title, candidate["title"]) >= 0.30:
+        if title_similarity(hearing.title, candidate["title"]) >= 0.30:
             old_id = candidate["id"]
             _migrate_hearing_id(old_id, hearing, state)
             return old_id

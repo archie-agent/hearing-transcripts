@@ -20,7 +20,7 @@ import httpx
 import config
 import scrapers
 from detail_scraper import scrape_hearing_detail
-from utils import TITLE_STOPWORDS, RateLimiter, YT_DLP_ENV
+from utils import TITLE_STOPWORDS, RateLimiter, YT_DLP_ENV, normalize_title, _TITLE_CLEAN_RE
 
 log = logging.getLogger(__name__)
 
@@ -67,33 +67,9 @@ class Hearing:
         return f"{chamber}-{committee}-{safe}"
 
 
-# ---------------------------------------------------------------------------
-# Title normalization for dedup — pre-compiled patterns
-# ---------------------------------------------------------------------------
-
-_TITLE_STRIP_RES = [
-    re.compile(r"^HEARING NOTICE:?\s*", re.IGNORECASE),
-    re.compile(r"^Hearing\s+Entitled:?\s*", re.IGNORECASE),
-    re.compile(r"^Oversight\s+Hearing\s*[-:]\s*", re.IGNORECASE),
-    re.compile(r"^Hearings?\s*:?\s*", re.IGNORECASE),
-    re.compile(r"^(Full Committee |Subcommittee )?Hearing:?\s*", re.IGNORECASE),
-    re.compile(r"^[\w&]+\s+Hearing:?\s*", re.IGNORECASE),
-    re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}\s*"),
-    re.compile(r"^\*+[A-Z\s]+\*+\s*"),
-    re.compile(r"^Upcoming\s*:?\s*", re.IGNORECASE),
-    re.compile(r"^(An? )?(Oversight )?Hearing[s]?\s+to\s+(examine|consider)\s+", re.IGNORECASE),
-    re.compile(r"\s+(Location|Time):.*$", re.IGNORECASE),
-    re.compile(r"WASHINGTON,?\s*D\.?C\.?\s*[-–—].*$", re.IGNORECASE),
-]
-_TITLE_CLEAN_RE = re.compile(r"[^a-z0-9\s]")
-
-
-def _normalize_title(title: str) -> str:
-    """Normalize a hearing title for comparison/dedup."""
-    for pattern in _TITLE_STRIP_RES:
-        title = pattern.sub("", title)
-    words = _TITLE_CLEAN_RE.sub("", title.lower()).split()[:8]
-    return " ".join(words)
+# Title normalization is in utils.normalize_title (canonical version).
+# _normalize_title alias for backward compatibility with this module's internal use.
+_normalize_title = normalize_title
 
 
 # ---------------------------------------------------------------------------
@@ -1356,13 +1332,16 @@ def _merge_adjacent_date_pairs(hearings: list[Hearing]) -> list[Hearing]:
 _CROSS_DEDUP_THRESHOLD = 0.4
 
 
-def _title_similarity(title_a: str, title_b: str) -> float:
+def title_similarity(title_a: str, title_b: str) -> float:
     """Jaccard similarity of word tokens between two titles."""
     words_a = set(_TITLE_CLEAN_RE.sub("", title_a.lower()).split())
     words_b = set(_TITLE_CLEAN_RE.sub("", title_b.lower()).split())
     if not words_a or not words_b:
         return 0.0
     return len(words_a & words_b) / len(words_a | words_b)
+
+# Backward-compatible alias
+_title_similarity = title_similarity
 
 
 def _chamber_from_key(committee_key: str) -> str:

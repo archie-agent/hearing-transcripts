@@ -1,7 +1,8 @@
-"""Tests for utils.py — title normalization, hearing ID, congress calculation."""
+"""Tests for utils.py — title normalization and congress calculation."""
 
-from utils import hearing_id, normalize_title
+from utils import normalize_title
 from config import current_congress
+from discover import Hearing
 
 
 class TestNormalizeTitle:
@@ -40,28 +41,27 @@ class TestNormalizeTitle:
 
 
 class TestHearingId:
+    """Hearing.id is the canonical ID (uses discover._normalize_title with ':' separator)."""
+
     def test_deterministic(self):
-        id1 = hearing_id("house.ways_and_means", "2026-02-10", "Tax Reform Hearing")
-        id2 = hearing_id("house.ways_and_means", "2026-02-10", "Tax Reform Hearing")
-        assert id1 == id2
+        h1 = Hearing("house.ways_and_means", "Ways and Means", "Tax Reform Hearing", "2026-02-10")
+        h2 = Hearing("house.ways_and_means", "Ways and Means", "Tax Reform Hearing", "2026-02-10")
+        assert h1.id == h2.id
 
     def test_12_chars(self):
-        result = hearing_id("senate.finance", "2026-01-15", "Budget Review")
-        assert len(result) == 12
+        h = Hearing("senate.finance", "Finance", "Budget Review", "2026-01-15")
+        assert len(h.id) == 12
 
     def test_different_inputs(self):
-        id1 = hearing_id("house.ways_and_means", "2026-02-10", "Tax Reform Hearing")
-        id2 = hearing_id("senate.finance", "2026-02-10", "Tax Reform Hearing")
-        assert id1 != id2
+        h1 = Hearing("house.ways_and_means", "Ways and Means", "Tax Reform Hearing", "2026-02-10")
+        h2 = Hearing("senate.finance", "Finance", "Tax Reform Hearing", "2026-02-10")
+        assert h1.id != h2.id
 
     def test_normalized_title_in_hash(self):
-        # Titles that normalize to the same thing should produce same ID
-        id1 = hearing_id("house.judiciary", "2026-03-01", "Full Committee Hearing: AI Regulation")
-        id2 = hearing_id("house.judiciary", "2026-03-01", "Hearing: AI Regulation and Technology Policy")
-        # These won't be equal because the normalized titles differ after prefix removal
-        # But titles with same prefix stripped + same first 8 words WILL match
-        id3 = hearing_id("house.judiciary", "2026-03-01", "Full Committee Hearing: AI Regulation")
-        assert id1 == id3
+        # Titles with same prefix stripped + same first 8 words WILL match
+        h1 = Hearing("house.judiciary", "Judiciary", "Full Committee Hearing: AI Regulation", "2026-03-01")
+        h3 = Hearing("house.judiciary", "Judiciary", "Full Committee Hearing: AI Regulation", "2026-03-01")
+        assert h1.id == h3.id
 
 
 class TestCurrentCongress:
