@@ -131,7 +131,10 @@ def _http_get(url: str, timeout: float = 20.0) -> httpx.Response | None:
             resp = client.get(url)
             # Handle 429 Too Many Requests with backoff
             if resp.status_code == 429:
-                retry_after = int(resp.headers.get("Retry-After", "5"))
+                try:
+                    retry_after = int(resp.headers.get("Retry-After", "5"))
+                except (ValueError, TypeError):
+                    retry_after = 5
                 retry_after = min(retry_after, 60)  # cap at 60s
                 log.debug("HTTP 429 for %s, waiting %ds", url, retry_after)
                 _time.sleep(retry_after)
@@ -140,7 +143,7 @@ def _http_get(url: str, timeout: float = 20.0) -> httpx.Response | None:
                 log.warning("HTTP %s for %s", resp.status_code, url)
                 return None
             return resp
-    except (httpx.HTTPError, httpx.TimeoutException, OSError) as e:
+    except (httpx.HTTPError, OSError) as e:
         log.warning("HTTP error for %s: %s", url, e)
         return None
 

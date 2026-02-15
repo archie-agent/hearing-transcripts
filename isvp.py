@@ -76,6 +76,9 @@ _VTT_TIMESTAMP_RE = re.compile(
     r"(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})"
 )
 
+# Seconds of silence between caption fragments that triggers a paragraph break
+_GAP_THRESHOLD = 8.0
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -415,13 +418,12 @@ def _merge_vtt_segments(segments: list[str]) -> str:
         return ""
 
     # Step 5: assemble into paragraphs with breaks at time gaps
-    GAP_THRESHOLD = 8.0  # seconds — pause between speakers/topics
     paragraphs: list[str] = []
     current_words: list[str] = []
     prev_ts = deduped[0][0]
 
     for ts, text in deduped:
-        if current_words and (ts - prev_ts) > GAP_THRESHOLD:
+        if current_words and (ts - prev_ts) > _GAP_THRESHOLD:
             paragraphs.append(" ".join(current_words))
             current_words = []
         current_words.append(text)

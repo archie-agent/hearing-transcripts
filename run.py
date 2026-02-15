@@ -341,7 +341,7 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
     state.mark_processed(hearing.id)
 
     # Write metadata to run dir
-    meta = {k: v for k, v in result.items()}
+    meta = result.copy()
     meta["processed_at"] = datetime.now(timezone.utc).isoformat()
     meta_path = hearing_dir / "meta.json"
     tmp = meta_path.with_suffix(".tmp")
@@ -417,7 +417,10 @@ def _publish_to_transcripts(hearing: Hearing, run_hearing_dir: Path, result: dic
     witnesses = hearing.sources.get("witnesses")
     if witnesses:
         meta["witnesses"] = witnesses
-    (transcript_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    meta_path = transcript_dir / "meta.json"
+    tmp = meta_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(meta, indent=2))
+    os.replace(tmp, meta_path)
 
     log.info("Published to %s", transcript_dir)
 
@@ -656,7 +659,10 @@ def main():
         ],
         "errors": errors,
     }
-    (run_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2))
+    run_meta_path = run_dir / "run_meta.json"
+    tmp = run_meta_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(run_meta, indent=2))
+    os.replace(tmp, run_meta_path)
 
     # Persist cost to state DB
     state.record_run(

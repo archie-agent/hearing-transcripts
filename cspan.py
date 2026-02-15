@@ -71,6 +71,15 @@ _SENTENCE_BOUNDARY_RE = re.compile(r"^[.!?]\s+$")
 # Pre-compiled regex for C-SPAN program/event ID extraction from URLs
 _CSPAN_PROGRAM_ID_RE = re.compile(r"/(?:program|event)/[^/]+/[^/]+/(\d+)")
 
+# Known abbreviations to preserve when converting ALL CAPS to sentence case
+_PRESERVE_ABBREVS = frozenset({
+    "U.S.", "USA", "GDP", "CBO", "OMB", "GAO", "FBI", "CIA", "NSA",
+    "DOD", "DOJ", "EPA", "IRS", "SEC", "FDIC", "FED", "FOMC",
+    "NATO", "UN", "EU", "IMF", "WHO", "COVID", "AI", "DOGE",
+    "HHS", "HUD", "DHS", "FEMA", "SBA", "NIH", "CDC", "FDA",
+    "CFPB", "FHFA", "FSOC", "OCC", "CFTC", "NCUA",
+})
+
 
 def _launch_cspan_browser(p):
     """Launch a Playwright browser configured for C-SPAN."""
@@ -828,10 +837,7 @@ def _build_transcript(parts: list[dict]) -> str:
             prev_speaker = None
         else:
             # Continuation of same speaker
-            if sections:
-                sections.append(text)
-            else:
-                sections.append(text)
+            sections.append(text)
 
     return "\n\n".join(sections)
 
@@ -845,15 +851,6 @@ def _normalize_caps(text: str) -> str:
     if upper_ratio < 0.6:
         return text
 
-    # Known abbreviations to preserve
-    preserve = {
-        "U.S.", "USA", "GDP", "CBO", "OMB", "GAO", "FBI", "CIA", "NSA",
-        "DOD", "DOJ", "EPA", "IRS", "SEC", "FDIC", "FED", "FOMC",
-        "NATO", "UN", "EU", "IMF", "WHO", "COVID", "AI", "DOGE",
-        "HHS", "HUD", "DHS", "FEMA", "SBA", "NIH", "CDC", "FDA",
-        "CFPB", "FHFA", "FSOC", "OCC", "CFTC", "NCUA",
-    }
-
     sentences = _SENTENCE_SPLIT_RE.split(text)
     result = []
 
@@ -866,7 +863,7 @@ def _normalize_caps(text: str) -> str:
         processed = []
         for j, word in enumerate(words):
             upper_word = word.upper().rstrip(".,;:!?'\"")
-            if upper_word in preserve:
+            if upper_word in _PRESERVE_ABBREVS:
                 processed.append(word)
             elif j == 0:
                 processed.append(word.capitalize())

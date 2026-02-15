@@ -6,7 +6,6 @@ per-hearing and per-committee source availability.
 """
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from collections import defaultdict
@@ -112,14 +111,17 @@ def main():
 
     # Source availability summary
     print(f"\n--- Source Availability ({totals['total']} hearings) ---")
-    print(f"  YouTube video:     {totals['youtube']:>4} ({100*totals['youtube']/totals['total']:.0f}%)")
-    print(f"  Committee website: {totals['website']:>4} ({100*totals['website']/totals['total']:.0f}%)")
-    print(f"  Congress.gov:      {totals['congress']:>4} ({100*totals['congress']/totals['total']:.0f}%)")
-    print(f"  C-SPAN:            {totals['cspan']:>4} ({100*totals['cspan']/totals['total']:.0f}%) [DDG/committee search skipped]")
-    print(f"  Senate ISVP:       {totals['isvp']:>4} ({100*totals['isvp']/totals['total']:.0f}%)")
-    print(f"  GovInfo official:  {totals['govinfo']:>4} ({100*totals['govinfo']/totals['total']:.0f}%)")
-    print(f"  Testimony PDFs:    {totals['testimony']:>4} ({100*totals['testimony']/totals['total']:.0f}%)")
-    print(f"  NO video source:   {totals['no_video']:>4} ({100*totals['no_video']/totals['total']:.0f}%)")
+    if totals['total'] > 0:
+        print(f"  YouTube video:     {totals['youtube']:>4} ({100*totals['youtube']/totals['total']:.0f}%)")
+        print(f"  Committee website: {totals['website']:>4} ({100*totals['website']/totals['total']:.0f}%)")
+        print(f"  Congress.gov:      {totals['congress']:>4} ({100*totals['congress']/totals['total']:.0f}%)")
+        print(f"  C-SPAN:            {totals['cspan']:>4} ({100*totals['cspan']/totals['total']:.0f}%) [DDG/committee search skipped]")
+        print(f"  Senate ISVP:       {totals['isvp']:>4} ({100*totals['isvp']/totals['total']:.0f}%)")
+        print(f"  GovInfo official:  {totals['govinfo']:>4} ({100*totals['govinfo']/totals['total']:.0f}%)")
+        print(f"  Testimony PDFs:    {totals['testimony']:>4} ({100*totals['testimony']/totals['total']:.0f}%)")
+        print(f"  NO video source:   {totals['no_video']:>4} ({100*totals['no_video']/totals['total']:.0f}%)")
+    else:
+        print("  No hearings found.")
 
 
 if __name__ == "__main__":

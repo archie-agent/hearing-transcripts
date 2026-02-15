@@ -18,9 +18,8 @@ import json
 import logging
 import os
 import re
-import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -30,7 +29,6 @@ import config
 from llm_utils import (
     call_openrouter,
     calculate_cost,
-    estimate_tokens,
     get_api_key,
     split_into_chunks,
 )
@@ -69,7 +67,7 @@ def find_recent_transcripts(lookback_days: int) -> list[dict]:
         logger.error("index.json not found at %s", index_path)
         return []
 
-    with open(index_path) as f:
+    with open(index_path, encoding="utf-8") as f:
         data = json.load(f)
 
     cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
@@ -96,7 +94,7 @@ def find_recent_transcripts(lookback_days: int) -> list[dict]:
 
         meta = {}
         if meta_file.exists():
-            with open(meta_file) as f:
+            with open(meta_file, encoding="utf-8") as f:
                 meta = json.load(f)
 
         recent.append({
@@ -146,7 +144,7 @@ def extract_quotes_from_transcript(
 ) -> tuple[list[Quote], float]:
     """Extract quotes from a single transcript. Returns (quotes, cost_usd)."""
     transcript_path = hearing["transcript_path"]
-    with open(transcript_path) as f:
+    with open(transcript_path, encoding="utf-8") as f:
         text = f.read()
 
     if not text.strip():

@@ -51,7 +51,7 @@ def _write_alert_file(message: str) -> Path:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     alert_path = ALERTS_DIR / f"{today}.txt"
 
-    with open(alert_path, "a") as f:
+    with open(alert_path, "a", encoding="utf-8") as f:
         f.write(message)
         f.write("\n---\n")
 

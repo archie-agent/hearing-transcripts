@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
@@ -275,8 +276,8 @@ def _accept_aspnet_link(link: Tag, href: str) -> bool:
 def _extract_links_from_containers(
     html: str,
     base_url: str,
-    container_fn: callable | None = None,
-    link_filter_fn: callable | None = None,
+    container_fn: Callable | None = None,
+    link_filter_fn: Callable | None = None,
 ) -> list[str]:
     """Core link extraction logic shared by all platform extractors.
 
@@ -480,7 +481,7 @@ def _extract_pdf_links(html: str, base_url: str) -> list[str]:
 #  Extractor registry — maps scraper_type to the right detail-page extractor
 # ===========================================================================
 
-_EXTRACTOR_REGISTRY: dict[str, callable] = {
+_EXTRACTOR_REGISTRY: dict[str, Callable] = {
     # Senate platforms
     "drupal_table": _extract_drupal_senate,
     "new_senate_cms": _extract_drupal_senate,

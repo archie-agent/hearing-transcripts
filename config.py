@@ -84,7 +84,7 @@ CONGRESS = current_congress()
 def _load_committees() -> dict[str, dict]:
     """Load committee config from JSON. Returns {key: {...committee data...}}."""
     try:
-        with open(COMMITTEES_JSON) as f:
+        with open(COMMITTEES_JSON, encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
         raise ValueError(f"committees.json not found at {COMMITTEES_JSON}")

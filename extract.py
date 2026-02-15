@@ -31,7 +31,7 @@ def download_pdf(url: str, output_dir: Path, filename: str | None = None) -> Pat
         pdf_path.write_bytes(resp.content)
         log.info("Downloaded PDF: %s (%.1f KB)", pdf_path.name, len(resp.content) / 1024)
         return pdf_path
-    except Exception as e:
+    except (httpx.HTTPError, OSError) as e:
         log.warning("PDF download error: %s", e)
         return None
 
@@ -54,11 +54,8 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
 
     # Fallback to basic pymupdf
     import pymupdf
-    doc = pymupdf.open(str(pdf_path))
-    pages = []
-    for page in doc:
-        pages.append(page.get_text())
-    doc.close()
+    with pymupdf.open(str(pdf_path)) as doc:
+        pages = [page.get_text() for page in doc]
     return "\n\n".join(pages)
 
 
@@ -131,7 +128,7 @@ def fetch_govinfo_transcript(package_id: str, output_dir: Path) -> Path | None:
                 log.info("GovInfo transcript (PDF): %d chars", len(text))
                 return txt_path
 
-        except Exception as e:
+        except (httpx.HTTPError, OSError) as e:
             log.warning("GovInfo download failed for %s (%s): %s", package_id, ext, e)
             continue
 

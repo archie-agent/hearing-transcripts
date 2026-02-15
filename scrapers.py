@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
@@ -647,7 +647,7 @@ def scrape_wordpress_calblocker(html: str, base_url: str, cutoff: datetime) -> l
 # Scraper registry — dispatch by scraper_type from committees.json
 # ---------------------------------------------------------------------------
 
-SCRAPER_REGISTRY: dict[str, callable] = {
+SCRAPER_REGISTRY: dict[str, Callable] = {
     "drupal_table": scrape_drupal_table,
     "coldfusion_table": scrape_coldfusion_table,
     "new_senate_cms": scrape_new_senate_cms,
@@ -745,7 +745,7 @@ def scrape_generic_links(html: str, base_url: str, cutoff: datetime) -> list[Scr
     return results
 
 
-SCRAPER_REGISTRY["generic_links"] = scrape_generic_links
+SCRAPER_REGISTRY["generic_links"] = scrape_generic_links  # registered after definition
 
 
 # ---------------------------------------------------------------------------
