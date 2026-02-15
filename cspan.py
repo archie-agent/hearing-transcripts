@@ -62,6 +62,35 @@ def _launch_cspan_browser(p):
     return browser, context, page
 
 
+def _navigate_with_waf_recovery(p, browser, context, page, search_url, label):
+    """Navigate to search_url with WAF captcha detection and one recovery attempt.
+
+    Returns (browser, context, page, waf_blocked).  Callers must update their
+    local references since browser/context/page may be replaced on recovery.
+    """
+    page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(7000)
+
+    body_text = (page.inner_text("body") or "")[:300]
+    if "confirm you are human" not in body_text.lower():
+        return browser, context, page, False
+
+    log.info("C-SPAN %s: WAF captcha, cooldown 60s...", label)
+    context.close()
+    browser.close()
+    _time.sleep(60)
+    browser, context, page = _launch_cspan_browser(p)
+    _rate_limit()
+    page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_timeout(7000)
+    body_text = (page.inner_text("body") or "")[:300]
+    if "confirm you are human" in body_text.lower():
+        log.warning("C-SPAN %s: WAF still blocked after cooldown", label)
+        return browser, context, page, True
+
+    return browser, context, page, False
+
+
 def discover_cspan_targeted(
     unmatched_hearings: list[dict],
     state=None,
@@ -137,27 +166,11 @@ def discover_cspan_targeted(
             _rate_limit()
 
             try:
-                page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(7000)
+                browser, context, page, waf_blocked = _navigate_with_waf_recovery(
+                    p, browser, context, page, search_url, "targeted")
                 searches_done += 1
-
-                # WAF detection
-                body_text = (page.inner_text("body") or "")[:300]
-                if "confirm you are human" in body_text.lower():
-                    log.info("C-SPAN targeted: WAF captcha at search %d, "
-                             "cooldown 60s...", searches_done)
-                    context.close()
-                    browser.close()
-                    _time.sleep(60)
-                    browser, context, page = _launch_cspan_browser(p)
-                    _rate_limit()
-                    page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(7000)
-                    body_text = (page.inner_text("body") or "")[:300]
-                    if "confirm you are human" in body_text.lower():
-                        log.warning("C-SPAN targeted: WAF still blocked after cooldown")
-                        waf_blocked = True
-                        break
+                if waf_blocked:
+                    break
 
                 search_results = _parse_search_results(page, cutoff)
 
@@ -248,26 +261,11 @@ def discover_cspan_rotation(
             _rate_limit()
 
             try:
-                page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(7000)
+                browser, context, page, waf_blocked = _navigate_with_waf_recovery(
+                    p, browser, context, page, search_url, f"rotation/{label}")
                 searches_done += 1
-
-                body_text = (page.inner_text("body") or "")[:300]
-                if "confirm you are human" in body_text.lower():
-                    log.info("C-SPAN rotation: WAF captcha at search %d (%s), "
-                             "cooldown 60s...", searches_done, label)
-                    context.close()
-                    browser.close()
-                    _time.sleep(60)
-                    browser, context, page = _launch_cspan_browser(p)
-                    _rate_limit()
-                    page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(7000)
-                    body_text = (page.inner_text("body") or "")[:300]
-                    if "confirm you are human" in body_text.lower():
-                        log.warning("C-SPAN rotation: WAF still blocked, aborting")
-                        waf_blocked = True
-                        return []
+                if waf_blocked:
+                    return []
 
                 return _parse_search_results(page, cutoff)
 
@@ -425,26 +423,11 @@ def discover_cspan_by_committee(
             _rate_limit()
 
             try:
-                page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(7000)
+                browser, context, page, waf_blocked = _navigate_with_waf_recovery(
+                    p, browser, context, page, search_url, f"by-committee/{key}")
                 searches_done += 1
-
-                body_text = (page.inner_text("body") or "")[:300]
-                if "confirm you are human" in body_text.lower():
-                    log.info("C-SPAN by-committee: WAF captcha at search %d (%s), "
-                             "cooldown 60s...", searches_done, key)
-                    context.close()
-                    browser.close()
-                    _time.sleep(60)
-                    browser, context, page = _launch_cspan_browser(p)
-                    _rate_limit()
-                    page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(7000)
-                    body_text = (page.inner_text("body") or "")[:300]
-                    if "confirm you are human" in body_text.lower():
-                        log.warning("C-SPAN by-committee: WAF still blocked, aborting")
-                        waf_blocked = True
-                        break
+                if waf_blocked:
+                    break
 
                 hearings = _parse_search_results(page, cutoff)
 
