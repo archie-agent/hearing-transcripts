@@ -27,12 +27,12 @@ from dotenv import load_dotenv
 import httpx
 
 import config
-from cleanup import (
-    _call_openrouter,
-    _calculate_cost,
-    _estimate_tokens,
-    _get_api_key,
-    _split_into_chunks,
+from llm_utils import (
+    call_openrouter,
+    calculate_cost,
+    estimate_tokens,
+    get_api_key,
+    split_into_chunks,
 )
 from state import State
 
@@ -153,7 +153,7 @@ def extract_quotes_from_transcript(
         return [], 0.0
 
     source_url = _get_source_url(hearing["meta"])
-    chunks = _split_into_chunks(text, chunk_size=4000, overlap=200)
+    chunks = split_into_chunks(text, chunk_size=4000, overlap=200)
     logger.info(
         "Extracting quotes from '%s' (%d chunks)",
         hearing["title"][:60],
@@ -166,10 +166,10 @@ def extract_quotes_from_transcript(
     for i, chunk in enumerate(chunks):
         prompt = EXTRACT_PROMPT.format(text=chunk)
         try:
-            response = _call_openrouter(prompt, config.DIGEST_MODEL, api_key)
+            response = call_openrouter(prompt, config.DIGEST_MODEL, api_key)
 
             usage = response.get("usage", {})
-            cost = _calculate_cost(
+            cost = calculate_cost(
                 config.DIGEST_MODEL,
                 usage.get("prompt_tokens", 0),
                 usage.get("completion_tokens", 0),
@@ -291,9 +291,9 @@ def compose_digest(quotes: list[Quote], api_key: str) -> tuple[str, float]:
     prompt = COMPOSE_PROMPT.format(quotes_json=json.dumps(grouped, indent=2))
 
     try:
-        response = _call_openrouter(prompt, config.DIGEST_MODEL, api_key, timeout=180.0)
+        response = call_openrouter(prompt, config.DIGEST_MODEL, api_key, timeout=180.0)
         usage = response.get("usage", {})
-        cost = _calculate_cost(
+        cost = calculate_cost(
             config.DIGEST_MODEL,
             usage.get("prompt_tokens", 0),
             usage.get("completion_tokens", 0),
@@ -332,9 +332,9 @@ def polish_digest(body: str, api_key: str) -> tuple[str, float]:
 
     cost = 0.0
     try:
-        response = _call_openrouter(prompt, config.DIGEST_POLISH_MODEL, api_key, timeout=120.0)
+        response = call_openrouter(prompt, config.DIGEST_POLISH_MODEL, api_key, timeout=120.0)
         usage = response.get("usage", {})
-        cost = _calculate_cost(
+        cost = calculate_cost(
             config.DIGEST_POLISH_MODEL,
             usage.get("prompt_tokens", 0),
             usage.get("completion_tokens", 0),
@@ -559,7 +559,7 @@ def run_digest(dry_run: bool = False) -> None:
         logger.info("Digest already sent today (%s), skipping", today)
         return
 
-    api_key = _get_api_key()
+    api_key = get_api_key()
     total_cost = 0.0
 
     # Step 1: Find recent transcripts

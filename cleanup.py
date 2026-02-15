@@ -10,23 +10,19 @@ This module cleans up raw YouTube auto-captions from congressional hearings by:
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
-
-import httpx
 
 import config
+from llm_utils import (
+    DEFAULT_CHUNK_SIZE,
+    calculate_cost,
+    call_openrouter,
+    estimate_tokens,
+    get_api_key,
+    split_into_chunks,
+)
 
 logger = logging.getLogger(__name__)
-
-# Default chunking parameters
-DEFAULT_CHUNK_SIZE = 3000  # tokens (approximate)
-DEFAULT_OVERLAP = 200  # tokens for context continuity
-
-# OpenRouter API endpoint
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 @dataclass
@@ -39,24 +35,6 @@ class CleanupResult:
     output_tokens: int
     cost_usd: float
     chunks_processed: int
-
-
-def _get_api_key() -> str:
-    """Get OpenRouter API key from environment (loaded by config.py via load_dotenv).
-
-    Returns:
-        API key string
-
-    Raises:
-        ValueError: If API key cannot be found
-    """
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if api_key:
-        return api_key
-
-    raise ValueError(
-        "OPENROUTER_API_KEY not found. Set the environment variable or add it to .env"
-    )
 
 
 def _build_diarization_prompt(
@@ -179,140 +157,6 @@ Provide the cleaned transcript:"""
     return prompt
 
 
-def _estimate_tokens(text: str) -> int:
-    """Estimate token count (rough approximation: 1 token ≈ 4 characters).
-
-    Args:
-        text: Text to estimate tokens for
-
-    Returns:
-        Estimated token count
-    """
-    return len(text) // 4
-
-
-def _split_into_chunks(
-    text: str,
-    chunk_size: int = DEFAULT_CHUNK_SIZE,
-    overlap: int = DEFAULT_OVERLAP,
-) -> list[str]:
-    """Split text into chunks on paragraph boundaries with overlap.
-
-    Args:
-        text: Text to split
-        chunk_size: Target chunk size in tokens
-        overlap: Number of tokens to overlap between chunks
-
-    Returns:
-        List of text chunks
-    """
-    # Split on double newlines (paragraph boundaries)
-    paragraphs = text.split("\n\n")
-
-    chunks = []
-    current_chunk = []
-    current_size = 0
-
-    for para in paragraphs:
-        para_size = _estimate_tokens(para)
-
-        # If adding this paragraph exceeds chunk size, save current chunk
-        if current_size + para_size > chunk_size and current_chunk:
-            chunks.append("\n\n".join(current_chunk))
-
-            # Keep last few paragraphs for overlap
-            overlap_size = 0
-            overlap_paras = []
-            for p in reversed(current_chunk):
-                p_size = _estimate_tokens(p)
-                if overlap_size + p_size > overlap:
-                    break
-                overlap_paras.insert(0, p)
-                overlap_size += p_size
-
-            current_chunk = overlap_paras
-            current_size = overlap_size
-
-        current_chunk.append(para)
-        current_size += para_size
-
-    # Add remaining chunk
-    if current_chunk:
-        chunks.append("\n\n".join(current_chunk))
-
-    return chunks if chunks else [text]
-
-
-def _calculate_cost(
-    model: str,
-    input_tokens: int,
-    output_tokens: int,
-) -> float:
-    """Calculate cost in USD for API call.
-
-    Args:
-        model: Model identifier
-        input_tokens: Number of input tokens
-        output_tokens: Number of output tokens
-
-    Returns:
-        Cost in USD
-    """
-    if model not in config.MODEL_PRICING:
-        logger.warning(f"Unknown model {model}, cannot calculate cost")
-        return 0.0
-
-    input_price, output_price = config.MODEL_PRICING[model]
-
-    # Prices are per 1M tokens
-    input_cost = (input_tokens / 1_000_000) * input_price
-    output_cost = (output_tokens / 1_000_000) * output_price
-
-    return input_cost + output_cost
-
-
-def _call_openrouter(
-    prompt: str,
-    model: str,
-    api_key: str,
-    timeout: float = 120.0,
-) -> dict[str, Any]:
-    """Call OpenRouter API.
-
-    Args:
-        prompt: Prompt to send
-        model: Model identifier
-        api_key: OpenRouter API key
-        timeout: Request timeout in seconds
-
-    Returns:
-        API response as dict
-
-    Raises:
-        httpx.HTTPError: If API call fails
-    """
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/anthropics/claude-code",
-    }
-
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
-    }
-
-    with httpx.Client(timeout=timeout) as client:
-        response = client.post(OPENROUTER_API_URL, json=payload, headers=headers)
-        response.raise_for_status()
-        return response.json()
-
-
 def cleanup_transcript(
     raw_text: str,
     hearing_title: str = "",
@@ -347,14 +191,14 @@ def cleanup_transcript(
     logger.info(f"Starting cleanup with model: {model}")
 
     # Get API key (lazy loading)
-    api_key = _get_api_key()
+    api_key = get_api_key()
 
     # Check if we need to chunk
-    estimated_tokens = _estimate_tokens(raw_text)
+    estimated_tokens = estimate_tokens(raw_text)
     logger.info(f"Estimated tokens: {estimated_tokens}")
 
     if estimated_tokens > DEFAULT_CHUNK_SIZE:
-        chunks = _split_into_chunks(raw_text)
+        chunks = split_into_chunks(raw_text)
         logger.info(f"Split into {len(chunks)} chunks")
     else:
         chunks = [raw_text]
@@ -376,7 +220,7 @@ def cleanup_transcript(
             total_chunks=len(chunks),
         )
 
-        response = _call_openrouter(prompt, model, api_key)
+        response = call_openrouter(prompt, model, api_key)
 
         # Extract cleaned text
         cleaned_text = response["choices"][0]["message"]["content"]
@@ -399,7 +243,7 @@ def cleanup_transcript(
     final_text = "\n\n".join(cleaned_chunks)
 
     # Calculate cost
-    cost = _calculate_cost(model, total_input_tokens, total_output_tokens)
+    cost = calculate_cost(model, total_input_tokens, total_output_tokens)
 
     logger.info(
         f"Cleanup complete: {len(chunks)} chunks, "

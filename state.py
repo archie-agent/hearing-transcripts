@@ -6,6 +6,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    """Ensure a datetime is timezone-aware (UTC).
+
+    SQLite strips timezone info, so datetimes read back may be naive.
+    This helper re-attaches UTC when needed.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 class State:
     """SQLite persistence layer for congressional hearing transcript pipeline."""
 
@@ -420,11 +431,8 @@ class State:
             row = cursor.fetchone()
             if row is None or row["last_searched"] is None:
                 return None
-            last = datetime.fromisoformat(row["last_searched"])
+            last = _ensure_utc(datetime.fromisoformat(row["last_searched"]))
             now = datetime.now(timezone.utc)
-            # Handle naive datetimes from older records
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=timezone.utc)
             return (now - last).days
         finally:
             conn.close()
@@ -462,9 +470,7 @@ class State:
             stale = []
             now = datetime.now(timezone.utc)
             for row in cursor.fetchall():
-                last = datetime.fromisoformat(row["last_searched"])
-                if last.tzinfo is None:
-                    last = last.replace(tzinfo=timezone.utc)
+                last = _ensure_utc(datetime.fromisoformat(row["last_searched"]))
                 age = (now - last).days
                 if age >= max_age_days:
                     stale.append(row["committee_key"])
@@ -545,9 +551,6 @@ class State:
             row = cursor.fetchone()
             if row is None or row["latest"] is None:
                 return None
-            last = datetime.fromisoformat(row["latest"])
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=timezone.utc)
-            return last
+            return _ensure_utc(datetime.fromisoformat(row["latest"]))
         finally:
             conn.close()
