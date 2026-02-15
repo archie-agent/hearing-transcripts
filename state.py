@@ -21,6 +21,10 @@ def _ensure_utc(dt: datetime) -> datetime:
 class State:
     """SQLite persistence layer for congressional hearing transcript pipeline."""
 
+    # Class-level cache: skip _init_db() if this db_path was already initialized
+    # in this process.  Safe because _init_db() is idempotent (CREATE IF NOT EXISTS).
+    _initialized_dbs: set[str] = set()
+
     def __init__(self, db_path: Path | None = None):
         if db_path is None:
             import config
@@ -30,8 +34,17 @@ class State:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
 
-        # Initialize database with tables
-        self._init_db()
+        # Initialize database with tables (skip if already done for this path)
+        db_key = str(self.db_path.resolve())
+        if db_key not in State._initialized_dbs:
+            self._init_db()
+            State._initialized_dbs.add(db_key)
+
+    def __enter__(self) -> State:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
     def _get_conn(self) -> sqlite3.Connection:
         """Get a thread-local database connection (created once per thread, reused)."""
