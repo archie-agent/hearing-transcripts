@@ -116,6 +116,205 @@ def _migrate_hearing_id(old_id: str, hearing: Hearing, state: State) -> None:
         os.replace(tmp, index_path)
 
 
+def _step_youtube_captions(hearing: Hearing, state: State, hearing_dir: Path,
+                           result: dict, cost: dict) -> None:
+    """Step 1: YouTube captions + LLM cleanup."""
+    youtube_url = hearing.sources.get("youtube_url")
+    if youtube_url:
+        if not state.is_step_done(hearing.id, "captions"):
+            state.mark_step(hearing.id, "captions", "running")
+            try:
+                audio_result = process_hearing_audio(
+                    youtube_url, hearing_dir,
+                    hearing_title=hearing.title,
+                    committee_name=hearing.committee_name,
+                )
+                result["outputs"]["audio"] = audio_result
+                cost["llm_cleanup_usd"] += audio_result.get("cleanup_cost_usd", 0)
+                cost["whisper_usd"] += audio_result.get("whisper_cost_usd", 0)
+                state.mark_step(hearing.id, "captions", "done")
+                state.mark_step(hearing.id, "cleanup", "done")
+            except (subprocess.SubprocessError, httpx.HTTPError, OSError, ValueError) as e:
+                state.mark_step(hearing.id, "captions", "failed", error=str(e))
+                log.error("Caption processing failed for %s: %s", hearing.id, e)
+        else:
+            log.info("Captions already processed for %s", hearing.id)
+    else:
+        state.mark_step(hearing.id, "captions", "done")
+        state.mark_step(hearing.id, "cleanup", "done")
+
+
+def _step_isvp_captions(hearing: Hearing, state: State, hearing_dir: Path,
+                        result: dict, cost: dict) -> None:
+    """Step 1.5: Senate ISVP captions (broadcast-quality stenographer captions)."""
+    isvp_comm = hearing.sources.get("isvp_comm")
+    isvp_filename = hearing.sources.get("isvp_filename")
+    if not (isvp_comm and isvp_filename):
+        return
+
+    if not state.is_step_done(hearing.id, "isvp_fetched"):
+        state.mark_step(hearing.id, "isvp", "running")
+        try:
+            from isvp import fetch_isvp_captions
+            isvp_text = fetch_isvp_captions(isvp_comm, isvp_filename)
+            if isvp_text:
+                isvp_path = hearing_dir / "isvp_transcript.txt"
+                tmp_fd, tmp_path = tempfile.mkstemp(dir=isvp_path.parent, suffix='.tmp')
+                try:
+                    with os.fdopen(tmp_fd, 'w') as f:
+                        f.write(isvp_text)
+                    os.replace(tmp_path, isvp_path)
+                except Exception:
+                    os.unlink(tmp_path)
+                    raise
+                result["outputs"]["isvp_transcript"] = str(isvp_path)
+                state.mark_step(hearing.id, "isvp_fetched", "done")
+                log.info("ISVP captions: %d chars for %s", len(isvp_text), hearing.id)
+            state.mark_step(hearing.id, "isvp", "done")
+        except (httpx.HTTPError, OSError, ValueError) as e:
+            state.mark_step(hearing.id, "isvp", "failed", error=str(e))
+            log.error("ISVP caption fetch failed for %s: %s", hearing.id, e)
+    else:
+        log.debug("ISVP transcript already fetched for %s", hearing.id)
+
+    # ISVP cleanup (text quality only, speaker labels already present)
+    if config.CLEANUP_MODEL and not state.is_step_done(hearing.id, "isvp_cleanup"):
+        isvp_raw_path = hearing_dir / "isvp_transcript.txt"
+        if isvp_raw_path.exists():
+            try:
+                isvp_raw = isvp_raw_path.read_text()
+                cleanup_result = cleanup_transcript(
+                    isvp_raw,
+                    hearing_title=hearing.title,
+                    committee_name=hearing.committee_name,
+                    skip_diarization=True,
+                )
+                cleaned_path = hearing_dir / "isvp_cleaned.txt"
+                tmp_fd, tmp_path = tempfile.mkstemp(dir=cleaned_path.parent, suffix='.tmp')
+                try:
+                    with os.fdopen(tmp_fd, 'w') as f:
+                        f.write(cleanup_result.text)
+                    os.replace(tmp_path, cleaned_path)
+                except Exception:
+                    os.unlink(tmp_path)
+                    raise
+                result["outputs"]["isvp_cleaned"] = str(cleaned_path)
+                cost["llm_cleanup_usd"] += cleanup_result.cost_usd
+                state.mark_step(hearing.id, "isvp_cleanup", "done")
+                log.info(
+                    "ISVP cleanup: %d→%d chars, $%.4f for %s",
+                    len(isvp_raw), len(cleanup_result.text),
+                    cleanup_result.cost_usd, hearing.id,
+                )
+            except (httpx.HTTPError, OSError, ValueError) as e:
+                state.mark_step(hearing.id, "isvp_cleanup", "failed", error=str(e))
+                log.error("ISVP cleanup failed for %s: %s", hearing.id, e)
+
+
+def _step_cspan_captions(hearing: Hearing, state: State, hearing_dir: Path,
+                         result: dict, cost: dict) -> None:
+    """Step 1.6: C-SPAN broadcast captions."""
+    cspan_url = hearing.sources.get("cspan_url")
+    if not cspan_url:
+        # Leave cspan step unmarked so it can be retried if a URL is discovered later
+        return
+
+    # Use "cspan_fetched" (transcript actually obtained) not "cspan" (step attempted).
+    # This allows retry if a previous run attempted but found no transcript.
+    if not state.is_step_done(hearing.id, "cspan_fetched"):
+        state.mark_step(hearing.id, "cspan", "running")
+        try:
+            import cspan
+            witnesses = hearing.sources.get("witnesses")
+            transcript_path = cspan.fetch_cspan_transcript(
+                cspan_url, hearing_dir, witnesses=witnesses,
+            )
+            if transcript_path:
+                result["outputs"]["cspan_transcript"] = str(transcript_path)
+                state.mark_step(hearing.id, "cspan_fetched", "done")
+            state.mark_step(hearing.id, "cspan", "done")
+        except ImportError:
+            log.debug("cspan module not available, skipping")
+            state.mark_step(hearing.id, "cspan", "done")
+        except (TimeoutError, OSError, ValueError) as e:
+            state.mark_step(hearing.id, "cspan", "failed", error=str(e))
+            log.error("C-SPAN caption fetch failed for %s: %s", hearing.id, e)
+    else:
+        log.debug("C-SPAN transcript already fetched for %s", hearing.id)
+
+    # C-SPAN cleanup (text quality only, speaker labels already present)
+    if config.CLEANUP_MODEL and not state.is_step_done(hearing.id, "cspan_cleanup"):
+        cspan_raw_path = hearing_dir / "cspan_transcript.txt"
+        if cspan_raw_path.exists():
+            try:
+                cspan_raw = cspan_raw_path.read_text()
+                cleanup_result = cleanup_transcript(
+                    cspan_raw,
+                    hearing_title=hearing.title,
+                    committee_name=hearing.committee_name,
+                    skip_diarization=True,
+                )
+                cleaned_path = hearing_dir / "cspan_cleaned.txt"
+                tmp_fd, tmp_path = tempfile.mkstemp(dir=cleaned_path.parent, suffix='.tmp')
+                try:
+                    with os.fdopen(tmp_fd, 'w') as f:
+                        f.write(cleanup_result.text)
+                    os.replace(tmp_path, cleaned_path)
+                except Exception:
+                    os.unlink(tmp_path)
+                    raise
+                result["outputs"]["cspan_cleaned"] = str(cleaned_path)
+                cost["llm_cleanup_usd"] += cleanup_result.cost_usd
+                state.mark_step(hearing.id, "cspan_cleanup", "done")
+                log.info(
+                    "C-SPAN cleanup: %d→%d chars, $%.4f for %s",
+                    len(cspan_raw), len(cleanup_result.text),
+                    cleanup_result.cost_usd, hearing.id,
+                )
+            except (httpx.HTTPError, OSError, ValueError) as e:
+                state.mark_step(hearing.id, "cspan_cleanup", "failed", error=str(e))
+                log.error("C-SPAN cleanup failed for %s: %s", hearing.id, e)
+
+
+def _step_testimony_pdfs(hearing: Hearing, state: State, hearing_dir: Path,
+                         result: dict, cost: dict) -> None:
+    """Step 2: Testimony PDFs."""
+    pdf_urls = hearing.sources.get("testimony_pdf_urls", [])
+    if pdf_urls:
+        if not state.is_step_done(hearing.id, "testimony"):
+            state.mark_step(hearing.id, "testimony", "running")
+            try:
+                testimony_dir = hearing_dir / "testimony"
+                testimony_dir.mkdir(exist_ok=True)
+                pdf_results = process_testimony_pdfs(pdf_urls, hearing_dir)
+                result["outputs"]["testimony"] = pdf_results
+                state.mark_step(hearing.id, "testimony", "done")
+            except (httpx.HTTPError, OSError, ValueError) as e:
+                state.mark_step(hearing.id, "testimony", "failed", error=str(e))
+                log.error("Testimony extraction failed for %s: %s", hearing.id, e)
+    else:
+        state.mark_step(hearing.id, "testimony", "done")
+
+
+def _step_govinfo_transcript(hearing: Hearing, state: State, hearing_dir: Path,
+                             result: dict, cost: dict) -> None:
+    """Step 3: GovInfo official transcript."""
+    govinfo_id = hearing.sources.get("govinfo_package_id")
+    if govinfo_id:
+        if not state.is_step_done(hearing.id, "govinfo"):
+            state.mark_step(hearing.id, "govinfo", "running")
+            try:
+                gpo_path = fetch_govinfo_transcript(govinfo_id, hearing_dir)
+                if gpo_path:
+                    result["outputs"]["govinfo_transcript"] = str(gpo_path)
+                state.mark_step(hearing.id, "govinfo", "done")
+            except (httpx.HTTPError, OSError, ValueError) as e:
+                state.mark_step(hearing.id, "govinfo", "failed", error=str(e))
+                log.error("GovInfo fetch failed for %s: %s", hearing.id, e)
+    else:
+        state.mark_step(hearing.id, "govinfo", "done")
+
+
 def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
     """Process a single hearing: captions, cleanup, PDFs, GovInfo.
 
@@ -152,189 +351,11 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
     # skipped (e.g. no YouTube URL means captions can't run — mark done so we
     # don't retry).  Leave unmarked if a future run might provide the input.
 
-    # 1. YouTube captions + LLM cleanup
-    youtube_url = hearing.sources.get("youtube_url")
-    if youtube_url:
-        if not state.is_step_done(hearing.id, "captions"):
-            state.mark_step(hearing.id, "captions", "running")
-            try:
-                audio_result = process_hearing_audio(
-                    youtube_url, hearing_dir,
-                    hearing_title=hearing.title,
-                    committee_name=hearing.committee_name,
-                )
-                result["outputs"]["audio"] = audio_result
-                cost["llm_cleanup_usd"] += audio_result.get("cleanup_cost_usd", 0)
-                cost["whisper_usd"] += audio_result.get("whisper_cost_usd", 0)
-                state.mark_step(hearing.id, "captions", "done")
-                state.mark_step(hearing.id, "cleanup", "done")
-            except (subprocess.SubprocessError, httpx.HTTPError, OSError, ValueError) as e:
-                state.mark_step(hearing.id, "captions", "failed", error=str(e))
-                log.error("Caption processing failed for %s: %s", hearing.id, e)
-        else:
-            log.info("Captions already processed for %s", hearing.id)
-    else:
-        state.mark_step(hearing.id, "captions", "done")
-        state.mark_step(hearing.id, "cleanup", "done")
-
-    # 1.5. Senate ISVP captions (broadcast-quality stenographer captions)
-    isvp_comm = hearing.sources.get("isvp_comm")
-    isvp_filename = hearing.sources.get("isvp_filename")
-    if isvp_comm and isvp_filename:
-        if not state.is_step_done(hearing.id, "isvp_fetched"):
-            state.mark_step(hearing.id, "isvp", "running")
-            try:
-                from isvp import fetch_isvp_captions
-                isvp_text = fetch_isvp_captions(isvp_comm, isvp_filename)
-                if isvp_text:
-                    isvp_path = hearing_dir / "isvp_transcript.txt"
-                    tmp_fd, tmp_path = tempfile.mkstemp(dir=isvp_path.parent, suffix='.tmp')
-                    try:
-                        with os.fdopen(tmp_fd, 'w') as f:
-                            f.write(isvp_text)
-                        os.replace(tmp_path, isvp_path)
-                    except Exception:
-                        os.unlink(tmp_path)
-                        raise
-                    result["outputs"]["isvp_transcript"] = str(isvp_path)
-                    state.mark_step(hearing.id, "isvp_fetched", "done")
-                    log.info(
-                        "ISVP captions: %d chars for %s",
-                        len(isvp_text), hearing.id,
-                    )
-                state.mark_step(hearing.id, "isvp", "done")
-            except (httpx.HTTPError, OSError, ValueError) as e:
-                state.mark_step(hearing.id, "isvp", "failed", error=str(e))
-                log.error("ISVP caption fetch failed for %s: %s", hearing.id, e)
-        else:
-            log.debug("ISVP transcript already fetched for %s", hearing.id)
-
-        # ISVP cleanup (text quality only, speaker labels already present)
-        if config.CLEANUP_MODEL and not state.is_step_done(hearing.id, "isvp_cleanup"):
-            isvp_raw_path = hearing_dir / "isvp_transcript.txt"
-            if isvp_raw_path.exists():
-                try:
-                    isvp_raw = isvp_raw_path.read_text()
-                    cleanup_result = cleanup_transcript(
-                        isvp_raw,
-                        hearing_title=hearing.title,
-                        committee_name=hearing.committee_name,
-                        skip_diarization=True,
-                    )
-                    cleaned_path = hearing_dir / "isvp_cleaned.txt"
-                    tmp_fd, tmp_path = tempfile.mkstemp(dir=cleaned_path.parent, suffix='.tmp')
-                    try:
-                        with os.fdopen(tmp_fd, 'w') as f:
-                            f.write(cleanup_result.text)
-                        os.replace(tmp_path, cleaned_path)
-                    except Exception:
-                        os.unlink(tmp_path)
-                        raise
-                    result["outputs"]["isvp_cleaned"] = str(cleaned_path)
-                    cost["llm_cleanup_usd"] += cleanup_result.cost_usd
-                    state.mark_step(hearing.id, "isvp_cleanup", "done")
-                    log.info(
-                        "ISVP cleanup: %d→%d chars, $%.4f for %s",
-                        len(isvp_raw), len(cleanup_result.text),
-                        cleanup_result.cost_usd, hearing.id,
-                    )
-                except (httpx.HTTPError, OSError, ValueError) as e:
-                    state.mark_step(hearing.id, "isvp_cleanup", "failed", error=str(e))
-                    log.error("ISVP cleanup failed for %s: %s", hearing.id, e)
-
-    # 1.6. C-SPAN broadcast captions
-    cspan_url = hearing.sources.get("cspan_url")
-    if cspan_url:
-        # Use "cspan_fetched" (transcript actually obtained) not "cspan" (step attempted).
-        # This allows retry if a previous run attempted but found no transcript.
-        if not state.is_step_done(hearing.id, "cspan_fetched"):
-            state.mark_step(hearing.id, "cspan", "running")
-            try:
-                import cspan
-                witnesses = hearing.sources.get("witnesses")
-                transcript_path = cspan.fetch_cspan_transcript(
-                    cspan_url, hearing_dir, witnesses=witnesses,
-                )
-                if transcript_path:
-                    result["outputs"]["cspan_transcript"] = str(transcript_path)
-                    state.mark_step(hearing.id, "cspan_fetched", "done")
-                state.mark_step(hearing.id, "cspan", "done")
-            except ImportError:
-                log.debug("cspan module not available, skipping")
-                state.mark_step(hearing.id, "cspan", "done")
-            except (TimeoutError, OSError, ValueError) as e:
-                state.mark_step(hearing.id, "cspan", "failed", error=str(e))
-                log.error("C-SPAN caption fetch failed for %s: %s", hearing.id, e)
-        else:
-            log.debug("C-SPAN transcript already fetched for %s", hearing.id)
-
-        # C-SPAN cleanup (text quality only, speaker labels already present)
-        if config.CLEANUP_MODEL and not state.is_step_done(hearing.id, "cspan_cleanup"):
-            cspan_raw_path = hearing_dir / "cspan_transcript.txt"
-            if cspan_raw_path.exists():
-                try:
-                    cspan_raw = cspan_raw_path.read_text()
-                    cleanup_result = cleanup_transcript(
-                        cspan_raw,
-                        hearing_title=hearing.title,
-                        committee_name=hearing.committee_name,
-                        skip_diarization=True,
-                    )
-                    cleaned_path = hearing_dir / "cspan_cleaned.txt"
-                    tmp_fd, tmp_path = tempfile.mkstemp(dir=cleaned_path.parent, suffix='.tmp')
-                    try:
-                        with os.fdopen(tmp_fd, 'w') as f:
-                            f.write(cleanup_result.text)
-                        os.replace(tmp_path, cleaned_path)
-                    except Exception:
-                        os.unlink(tmp_path)
-                        raise
-                    result["outputs"]["cspan_cleaned"] = str(cleaned_path)
-                    cost["llm_cleanup_usd"] += cleanup_result.cost_usd
-                    state.mark_step(hearing.id, "cspan_cleanup", "done")
-                    log.info(
-                        "C-SPAN cleanup: %d→%d chars, $%.4f for %s",
-                        len(cspan_raw), len(cleanup_result.text),
-                        cleanup_result.cost_usd, hearing.id,
-                    )
-                except (httpx.HTTPError, OSError, ValueError) as e:
-                    state.mark_step(hearing.id, "cspan_cleanup", "failed", error=str(e))
-                    log.error("C-SPAN cleanup failed for %s: %s", hearing.id, e)
-    # (If no cspan_url, leave cspan step unmarked so it can be retried
-    # if a URL is discovered on a future run.)
-
-    # 2. Testimony PDFs
-    pdf_urls = hearing.sources.get("testimony_pdf_urls", [])
-    if pdf_urls:
-        if not state.is_step_done(hearing.id, "testimony"):
-            state.mark_step(hearing.id, "testimony", "running")
-            try:
-                testimony_dir = hearing_dir / "testimony"
-                testimony_dir.mkdir(exist_ok=True)
-                pdf_results = process_testimony_pdfs(pdf_urls, hearing_dir)
-                result["outputs"]["testimony"] = pdf_results
-                state.mark_step(hearing.id, "testimony", "done")
-            except (httpx.HTTPError, OSError, ValueError) as e:
-                state.mark_step(hearing.id, "testimony", "failed", error=str(e))
-                log.error("Testimony extraction failed for %s: %s", hearing.id, e)
-    else:
-        state.mark_step(hearing.id, "testimony", "done")
-
-    # 3. GovInfo official transcript
-    govinfo_id = hearing.sources.get("govinfo_package_id")
-    if govinfo_id:
-        if not state.is_step_done(hearing.id, "govinfo"):
-            state.mark_step(hearing.id, "govinfo", "running")
-            try:
-                gpo_path = fetch_govinfo_transcript(govinfo_id, hearing_dir)
-                if gpo_path:
-                    result["outputs"]["govinfo_transcript"] = str(gpo_path)
-                state.mark_step(hearing.id, "govinfo", "done")
-            except (httpx.HTTPError, OSError, ValueError) as e:
-                state.mark_step(hearing.id, "govinfo", "failed", error=str(e))
-                log.error("GovInfo fetch failed for %s: %s", hearing.id, e)
-    else:
-        state.mark_step(hearing.id, "govinfo", "done")
+    _step_youtube_captions(hearing, state, hearing_dir, result, cost)
+    _step_isvp_captions(hearing, state, hearing_dir, result, cost)
+    _step_cspan_captions(hearing, state, hearing_dir, result, cost)
+    _step_testimony_pdfs(hearing, state, hearing_dir, result, cost)
+    _step_govinfo_transcript(hearing, state, hearing_dir, result, cost)
 
     # Compute total cost
     cost["total_usd"] = cost["llm_cleanup_usd"] + cost["whisper_usd"]

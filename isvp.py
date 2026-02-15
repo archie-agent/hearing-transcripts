@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
@@ -189,22 +190,27 @@ def fetch_isvp_captions(comm: str, filename: str) -> str | None:
 
         log.info("Downloading %d VTT segments for %s/%s", len(segment_uris), comm, filename)
 
+        # Download segments in parallel (httpx.Client is thread-safe for reads)
+        seg_urls = [urljoin(subtitle_url, uri) for uri in segment_uris]
+        indexed_results: dict[int, str | None] = {}
+
+        def _download_seg(idx_url: tuple[int, str]) -> tuple[int, str | None]:
+            idx, url = idx_url
+            return idx, _fetch_url(client, url)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for idx, text in pool.map(_download_seg, enumerate(seg_urls)):
+                indexed_results[idx] = text
+
         segments: list[str] = []
-        empty_count = 0
         fail_count = 0
-        for uri in segment_uris:
-            seg_url = urljoin(subtitle_url, uri)
-            seg_text = _fetch_url(client, seg_url)
+        for idx in range(len(seg_urls)):
+            seg_text = indexed_results.get(idx)
             if seg_text is not None:
                 segments.append(seg_text)
-                # Track consecutive empties for early-termination logging
-                if _is_empty_vtt(seg_text):
-                    empty_count += 1
-                else:
-                    empty_count = 0
             else:
                 fail_count += 1
-                log.debug("Skipped segment: %s", seg_url)
+                log.debug("Skipped segment: %s", seg_urls[idx])
 
         if fail_count and segment_uris:
             fail_pct = fail_count / len(segment_uris)

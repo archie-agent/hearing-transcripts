@@ -1168,7 +1168,9 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
     # so iframe-extracted params from the detail scraper can override)
     _attach_isvp_params(deduped, committees)
 
-    # After dedup, enrich with testimony PDFs
+    # After dedup, enrich with testimony PDFs (parallel — rate limiter
+    # in detail_scraper serializes per-domain requests)
+    scrape_targets = []
     for hearing in deduped:
         website_url = hearing.sources.get("website_url")
         if not website_url:
@@ -1178,6 +1180,11 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
         can_scrape = meta.get("has_testimony", False) or meta.get("scrapeable", False)
         if not can_scrape and not is_senate:
             continue
+        scrape_targets.append((hearing, meta))
+
+    def _scrape_detail(target: tuple[Hearing, dict]) -> None:
+        hearing, meta = target
+        website_url = hearing.sources["website_url"]
         try:
             detail = scrape_hearing_detail(
                 hearing.committee_key, website_url, meta,
@@ -1192,6 +1199,10 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
                 hearing.sources["youtube_id"] = detail.youtube_id
         except (httpx.HTTPError, OSError, ValueError) as e:
             log.warning("PDF extraction failed for %s: %s", website_url, e)
+
+    if scrape_targets:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(_scrape_detail, scrape_targets))
 
     return deduped
 
