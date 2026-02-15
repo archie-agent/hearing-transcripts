@@ -9,8 +9,8 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from collections import Counter, defaultdict
-from datetime import date, timedelta
+from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv

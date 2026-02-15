@@ -22,6 +22,7 @@ import httpx
 import config
 import scrapers
 from detail_scraper import scrape_hearing_detail
+from utils import TITLE_STOPWORDS
 
 log = logging.getLogger(__name__)
 
@@ -1481,17 +1482,9 @@ def _keyword_overlap(title_a: str, title_b: str) -> int:
     remaining words appear in both titles. More tolerant of title format
     differences than Jaccard similarity (which penalizes differing lengths).
     """
-    _STOPWORDS = {
-        "the", "a", "an", "of", "in", "on", "to", "for", "and", "or",
-        "at", "by", "is", "it", "as", "be", "was", "are", "its", "with",
-        "that", "this", "from", "before", "after", "hearing", "committee",
-        "subcommittee", "full", "oversight", "examine", "examining",
-        "regarding", "concerning", "review", "united", "states", "senate",
-        "house", "congress", "testifies", "testimony", "witnesses",
-    }
     def _significant_words(text: str) -> set[str]:
         words = set(re.sub(r"[^a-z0-9\s]", "", text.lower()).split())
-        return {w for w in words if len(w) >= 3 and w not in _STOPWORDS}
+        return {w for w in words if len(w) >= 3 and w not in TITLE_STOPWORDS}
 
     words_a = _significant_words(title_a)
     words_b = _significant_words(title_b)

@@ -10,6 +10,19 @@ from threading import Lock
 import httpx
 
 
+# Common stopwords for hearing title keyword extraction / comparison.
+# Shared by discover.py and cspan.py.
+TITLE_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "in", "on", "to", "for", "and", "or",
+    "at", "by", "is", "it", "as", "be", "was", "are", "its", "with",
+    "that", "this", "from", "before", "after", "hearing", "committee",
+    "subcommittee", "full", "oversight", "examine", "examining",
+    "regarding", "concerning", "review", "united", "states", "senate",
+    "house", "congress", "testifies", "testimony", "witnesses",
+    "hearings", "focusing",
+})
+
+
 # yt-dlp environment setup — include venv bin so yt-dlp is found
 _VENV_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin")
 DENO_DIR = os.path.expanduser("~/.deno/bin")
@@ -44,12 +57,6 @@ class RateLimiter:
                 if elapsed < self.min_delay:
                     time.sleep(self.min_delay - elapsed)
             self._last_request[domain] = time.time()
-
-
-def current_congress() -> int:
-    """Calculate current Congress number from date."""
-    year = datetime.now().year
-    return (year - 1789) // 2 + 1
 
 
 def hearing_id(committee_key: str, date: str, title: str) -> str:

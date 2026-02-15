@@ -18,6 +18,7 @@ from urllib.parse import quote_plus
 import httpx
 
 import config
+from utils import TITLE_STOPWORDS
 
 log = logging.getLogger(__name__)
 
@@ -561,21 +562,10 @@ def _parse_search_results(page, cutoff: datetime) -> list[dict]:
 
 _DDG_DELAY = 4.0  # seconds between DDG searches (avoid 202 rate limits)
 
-_STOPWORDS = {
-    "the", "a", "an", "of", "in", "on", "to", "for", "and", "or",
-    "at", "by", "is", "it", "as", "be", "was", "are", "its", "with",
-    "that", "this", "from", "before", "after", "hearing", "committee",
-    "subcommittee", "full", "oversight", "examine", "examining",
-    "regarding", "concerning", "review", "united", "states", "senate",
-    "house", "congress", "testifies", "testimony", "witnesses",
-    "hearings", "focusing",
-}
-
-
 def _extract_search_keywords(title: str, max_words: int = 5) -> str:
     """Extract significant keywords from a hearing title for search."""
     words = re.sub(r"[^a-z0-9\s]", "", title.lower()).split()
-    significant = [w for w in words if len(w) >= 3 and w not in _STOPWORDS]
+    significant = [w for w in words if len(w) >= 3 and w not in TITLE_STOPWORDS]
     return " ".join(significant[:max_words])
 
 
