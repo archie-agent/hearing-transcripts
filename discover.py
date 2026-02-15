@@ -140,7 +140,7 @@ def _http_get(url: str, timeout: float = 20.0) -> httpx.Response | None:
                 log.warning("HTTP %s for %s", resp.status_code, url)
                 return None
             return resp
-    except Exception as e:
+    except (httpx.HTTPError, httpx.TimeoutException, OSError) as e:
         log.warning("HTTP error for %s: %s", url, e)
         return None
 
@@ -675,8 +675,8 @@ def _fetch_govinfo_committee(package_id: str) -> str | None:
 
     try:
         data = resp.json()
-    except Exception:
-        log.warning("GovInfo summary for %s returned non-JSON", package_id)
+    except (json.JSONDecodeError, ValueError) as e:
+        log.warning("GovInfo summary for %s returned non-JSON: %s", package_id, e)
         return None
 
     # Detect chamber from packageId
@@ -748,8 +748,8 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
 
             try:
                 data = resp.json()
-            except Exception:
-                log.warning("congress.gov API returned non-JSON for %s", chamber)
+            except (json.JSONDecodeError, ValueError) as e:
+                log.warning("congress.gov API returned non-JSON for %s: %s", chamber, e)
                 break
 
             meetings = data.get("committeeMeetings", [])
@@ -773,7 +773,7 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
 
                 try:
                     detail = detail_resp.json()
-                except Exception:
+                except (json.JSONDecodeError, ValueError):
                     continue
 
                 # The detail may be nested under a key or at top level
@@ -890,8 +890,8 @@ def discover_govinfo(days: int = 7) -> list[Hearing]:
 
     try:
         data = resp.json()
-    except Exception:
-        log.warning("GovInfo returned non-JSON response")
+    except (json.JSONDecodeError, ValueError) as e:
+        log.warning("GovInfo returned non-JSON response: %s", e)
         return []
 
     # GovInfo collections API returns packages *modified* since cutoff, not
@@ -1122,11 +1122,11 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
                   "committee_name": h.committee_name}
                  for h in unmatched]
             )
+            by_id = {h.id: h for h in deduped}
             for r in google_results:
-                for h in deduped:
-                    if h.id == r["hearing_id"]:
-                        h.sources["cspan_url"] = r["cspan_url"]
-                        break
+                h = by_id.get(r["hearing_id"])
+                if h:
+                    h.sources["cspan_url"] = r["cspan_url"]
 
         # Step 2: Sponsor ID search for committees with unmatched hearings (WAF-limited)
         still_unmatched = [h for h in deduped
@@ -1356,8 +1356,8 @@ _CROSS_DEDUP_THRESHOLD = 0.4
 
 def _title_similarity(title_a: str, title_b: str) -> float:
     """Jaccard similarity of word tokens between two titles."""
-    words_a = set(re.sub(r"[^a-z0-9\s]", "", title_a.lower()).split())
-    words_b = set(re.sub(r"[^a-z0-9\s]", "", title_b.lower()).split())
+    words_a = set(_TITLE_CLEAN_RE.sub("", title_a.lower()).split())
+    words_b = set(_TITLE_CLEAN_RE.sub("", title_b.lower()).split())
     if not words_a or not words_b:
         return 0.0
     return len(words_a & words_b) / len(words_a | words_b)
@@ -1479,7 +1479,7 @@ def _keyword_overlap(title_a: str, title_b: str) -> int:
     differences than Jaccard similarity (which penalizes differing lengths).
     """
     def _significant_words(text: str) -> set[str]:
-        words = set(re.sub(r"[^a-z0-9\s]", "", text.lower()).split())
+        words = set(_TITLE_CLEAN_RE.sub("", text.lower()).split())
         return {w for w in words if len(w) >= 3 and w not in TITLE_STOPWORDS}
 
     words_a = _significant_words(title_a)

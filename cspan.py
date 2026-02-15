@@ -54,6 +54,24 @@ BATCH_SIZE = 2
 BATCH_COOLDOWN = 45  # seconds between batches
 
 
+def _batch_cooldown(searches_done: int, label: str) -> None:
+    """Sleep for BATCH_COOLDOWN if we've hit a batch boundary."""
+    if searches_done > 0 and searches_done % BATCH_SIZE == 0:
+        log.info("C-SPAN %s: cooldown (%ds) after %d searches",
+                 label, BATCH_COOLDOWN, searches_done)
+        _time.sleep(BATCH_COOLDOWN)
+
+
+# Pre-compiled regex patterns for transcript processing
+_NEWLINE_RE = re.compile(r"\n+")
+_MULTI_SPACE_RE = re.compile(r"\s{2,}")
+_SENTENCE_SPLIT_RE = re.compile(r"([.!?]\s+)")
+_SENTENCE_BOUNDARY_RE = re.compile(r"^[.!?]\s+$")
+
+# Pre-compiled regex for C-SPAN program/event ID extraction from URLs
+_CSPAN_PROGRAM_ID_RE = re.compile(r"/(?:program|event)/[^/]+/[^/]+/(\d+)")
+
+
 def _launch_cspan_browser(p):
     """Launch a Playwright browser configured for C-SPAN."""
     browser = p.chromium.launch(headless=True)
@@ -146,11 +164,7 @@ def discover_cspan_targeted(
             if waf_blocked:
                 break
 
-            # Batch cooldown
-            if searches_done > 0 and searches_done % BATCH_SIZE == 0:
-                log.info("C-SPAN targeted: cooldown (%ds) after %d searches",
-                         BATCH_COOLDOWN, searches_done)
-                _time.sleep(BATCH_COOLDOWN)
+            _batch_cooldown(searches_done, "targeted")
 
             # Build search query from title keywords
             keywords = _extract_search_keywords(h["title"])
@@ -249,10 +263,7 @@ def discover_cspan_rotation(
         def _search_committee(cspan_id: str, label: str) -> list[dict]:
             nonlocal searches_done, waf_blocked, context, page, browser
 
-            if searches_done > 0 and searches_done % BATCH_SIZE == 0:
-                log.info("C-SPAN rotation: cooldown (%ds) after %d searches",
-                         BATCH_COOLDOWN, searches_done)
-                _time.sleep(BATCH_COOLDOWN)
+            _batch_cooldown(searches_done, f"rotation/{label}")
 
             search_url = (
                 f"https://www.c-span.org/search/?query=&searchtype=Videos"
@@ -409,11 +420,7 @@ def discover_cspan_by_committee(
             if waf_blocked:
                 break
 
-            # Batch cooldown
-            if searches_done > 0 and searches_done % BATCH_SIZE == 0:
-                log.info("C-SPAN by-committee: cooldown (%ds) after %d searches",
-                         BATCH_COOLDOWN, searches_done)
-                _time.sleep(BATCH_COOLDOWN)
+            _batch_cooldown(searches_done, "by-committee")
 
             cspan_id = meta["cspan_id"]
             search_url = (
@@ -489,7 +496,7 @@ def _parse_search_results(page, cutoff: datetime) -> list[dict]:
                 continue
 
             # Extract program ID from URL: /program/.../672588 or /event/.../434689
-            prog_match = re.search(r"/(?:program|event)/[^/]+/[^/]+/(\d+)", href)
+            prog_match = _CSPAN_PROGRAM_ID_RE.search(href)
             if not prog_match:
                 continue
             program_id = prog_match.group(1)
@@ -647,7 +654,7 @@ def discover_cspan_google(
             program_id = None
             for raw in raw_urls:
                 url = raw.replace("&amp;", "&")
-                m = re.search(r"/(?:program|event)/[^/]+/[^/]+/(\d+)", url)
+                m = _CSPAN_PROGRAM_ID_RE.search(url)
                 if not m:
                     continue
                 pid = m.group(1)
@@ -804,8 +811,8 @@ def _build_transcript(parts: list[dict]) -> str:
         # Clean up the text
         text = _normalize_caps(text)
         # Collapse internal line breaks from caption formatting
-        text = re.sub(r"\n+", " ", text)
-        text = re.sub(r"\s{2,}", " ", text).strip()
+        text = _NEWLINE_RE.sub(" ", text)
+        text = _MULTI_SPACE_RE.sub(" ", text).strip()
 
         # Determine speaker label
         speaker = (part.get("cc_name") or "").strip()
@@ -847,11 +854,11 @@ def _normalize_caps(text: str) -> str:
         "CFPB", "FHFA", "FSOC", "OCC", "CFTC", "NCUA",
     }
 
-    sentences = re.split(r"([.!?]\s+)", text)
+    sentences = _SENTENCE_SPLIT_RE.split(text)
     result = []
 
     for segment in sentences:
-        if re.match(r"^[.!?]\s+$", segment):
+        if _SENTENCE_BOUNDARY_RE.match(segment):
             result.append(segment)
             continue
 

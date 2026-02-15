@@ -48,9 +48,6 @@ def main():
     hearings = past_hearings
 
     # Analyze sources
-    source_keys = ["youtube_url", "website_url", "congress_url", "cspan_url",
-                   "isvp_comm", "govinfo_package_id", "testimony_pdf_urls", "witnesses"]
-
     # Per-hearing summary
     committee_stats = defaultdict(lambda: {"total": 0, "youtube": 0, "website": 0,
                                             "congress": 0, "cspan": 0, "isvp": 0,

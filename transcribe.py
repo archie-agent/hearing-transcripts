@@ -17,7 +17,7 @@ def get_youtube_captions(youtube_url: str, output_dir: Path) -> Path | None:
     """Download YouTube auto-generated captions as a text file. Free, instant."""
     captions_file = output_dir / "captions.txt"
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 "yt-dlp",
                 "--remote-components", "ejs:github",
@@ -33,6 +33,9 @@ def get_youtube_captions(youtube_url: str, output_dir: Path) -> Path | None:
             timeout=120,
             env=YT_DLP_ENV,
         )
+        if result.returncode != 0:
+            log.warning("yt-dlp failed (exit %d): %s", result.returncode, result.stderr[:500] if result.stderr else "no stderr")
+            return None
         # Find the downloaded VTT file
         vtt_files = list(output_dir.glob("captions*.vtt"))
         if not vtt_files:
@@ -155,7 +158,7 @@ def _transcribe_single(client, audio_path: Path) -> str | None:
     try:
         try:
             result = client.audio.transcriptions.create(
-                model="gpt-4o-transcribe",
+                model=config.TRANSCRIPTION_MODEL,
                 file=audio_path,
                 response_format="verbose_json",
                 include=["logprobs"],
@@ -171,8 +174,8 @@ def _transcribe_single(client, audio_path: Path) -> str | None:
                         lines.append(text)
                 return "\n".join(lines)
             return result.text
-        except Exception:
-            log.info("Falling back to whisper-1")
+        except Exception as e:
+            log.info("%s failed (%s), falling back to whisper-1", config.TRANSCRIPTION_MODEL, e)
             result = client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_path,

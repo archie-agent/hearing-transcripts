@@ -169,286 +169,141 @@ def _fetch_detail_page(url: str) -> str | None:
 
 
 # ===========================================================================
-#  Platform-specific extractors
+#  Shared link-extraction engine
 #
-#  Each function takes (html, base_url) and returns a list of absolute PDF
-#  URLs found on that detail page.
+#  All platform extractors delegate to _extract_links_from_containers,
+#  supplying only the per-platform container selector and link filter.
 # ===========================================================================
 
 
-# ---------------------------------------------------------------------------
-# drupal_table / new_senate_cms
-# Senate Finance, Banking, Budget, Appropriations, Foreign Relations, HELP,
-# Judiciary, Armed Services, Agriculture, Rules
-#
-# Detail pages have links with text containing "Download", "Testimony",
-# "Statement". href ends in .pdf or contains /download/.
-# ---------------------------------------------------------------------------
+def _accept_drupal_link(link: Tag, href: str) -> bool:
+    """Link filter for Senate Drupal / new CMS / drupal_links pages.
 
-def _extract_drupal_senate(html: str, base_url: str) -> list[str]:
-    """Extract testimony PDFs from Senate Drupal / new CMS detail pages.
-
-    These sites typically present testimony documents as:
-    - Direct .pdf links under a "Testimony" or "Statements" heading
-    - /download/{filename} links served through the CMS
-    - /services/files/{GUID} links for older content
+    Accepts:
+    - Any href recognized by _is_pdf_href (PDF extension, /download/, etc.)
+    - Testimony-signalled links with /download/ or /services/files/ paths
+    - Testimony-signalled links with a file-like extension
     """
-    soup = BeautifulSoup(html, "lxml")
-    urls: list[str] = []
+    if _is_pdf_href(href):
+        return True
+    if _has_testimony_signal(link):
+        if "/download/" in href or "/services/files/" in href:
+            return True
+        if re.search(r"\.\w{2,4}$", href.split("?")[0]):
+            return True
+    return False
 
-    for link in soup.find_all("a", href=True):
-        href = link.get("href", "")
-        abs_href = _abs_url(href, base_url)
-        if not abs_href:
-            continue
 
-        if _should_exclude(link, href):
-            continue
+def _accept_wordpress_link(link: Tag, href: str) -> bool:
+    """Link filter for WordPress-based committee pages.
 
-        # Strategy 1: href is clearly a PDF resource
-        if _is_pdf_href(href):
-            # Prefer links with testimony signal, but accept all PDFs
-            # on detail pages (they're almost always testimony)
-            urls.append(abs_href)
-            continue
+    Accepts:
+    - /wp-content/uploads/YYYY/MM/*.pdf (WordPress upload pattern)
+    - Any href recognized by _is_pdf_href
+    - Testimony-signalled links with a file-like extension
+    """
+    if re.search(r"/wp-content/uploads/\d{4}/\d{2}/[^/]+\.pdf", href, re.IGNORECASE):
+        return True
+    if _is_pdf_href(href):
+        return True
+    if _has_testimony_signal(link):
+        if re.search(r"\.\w{2,4}$", href.split("?")[0]):
+            return True
+    return False
 
-        # Strategy 2: Link text suggests testimony AND href looks downloadable
+
+def _accept_coldfusion_link(link: Tag, href: str) -> bool:
+    """Link filter for ColdFusion-based Senate pages.
+
+    Accepts:
+    - files.serve pattern (ColdFusion file delivery)
+    - Any href recognized by _is_pdf_href
+    - Testimony-signalled links with file_id= parameter
+    """
+    if re.search(r"files\.serve", href, re.IGNORECASE):
+        return True
+    if _is_pdf_href(href):
+        return True
+    if _has_testimony_signal(link):
+        if re.search(r"file_id=", href, re.IGNORECASE):
+            return True
+    return False
+
+
+def _accept_house_link(link: Tag, href: str) -> bool:
+    """Link filter for House evo_framework pages.
+
+    Accepts:
+    - docs.house.gov PDF links unconditionally
+    - Other PDFs with testimony signal or from document storage paths
+    - docs.house.gov links (even non-PDF) with testimony signal
+    """
+    if "docs.house.gov" in href and _is_pdf_href(href):
+        return True
+    if _is_pdf_href(href):
         if _has_testimony_signal(link):
-            # Even without .pdf extension, /download/ paths are PDFs
-            if "/download/" in href or "/services/files/" in href:
-                urls.append(abs_href)
-                continue
-            # Accept if the link href has a file-like pattern
-            if re.search(r"\.\w{2,4}$", href.split("?")[0]):
-                urls.append(abs_href)
+            return True
+        if re.search(
+            r"/sites/default/files/|/uploads/|/documents/|/files/",
+            href, re.IGNORECASE,
+        ):
+            return True
+    if "docs.house.gov" in href and _has_testimony_signal(link):
+        return True
+    return False
 
-    return _deduplicate_urls(urls)
 
+def _accept_aspnet_link(link: Tag, href: str) -> bool:
+    """Link filter for House ASP.NET card-style pages.
 
-# ---------------------------------------------------------------------------
-# drupal_links
-# Senate Commerce, Energy, Veterans
-#
-# Similar to drupal_senate but files often at /download/{filename} or
-# /services/files/{GUID}.
-# ---------------------------------------------------------------------------
-
-def _extract_drupal_links(html: str, base_url: str) -> list[str]:
-    """Extract PDFs from Senate Drupal announcement-style detail pages.
-
-    These sites use:
-    - /download/{filename} paths
-    - /services/files/{GUID} paths
-    - Direct .pdf links
+    Same as _accept_house_link but without the non-PDF docs.house.gov
+    testimony fallback.
     """
-    soup = BeautifulSoup(html, "lxml")
-    urls: list[str] = []
-
-    for link in soup.find_all("a", href=True):
-        href = link.get("href", "")
-        abs_href = _abs_url(href, base_url)
-        if not abs_href:
-            continue
-
-        if _should_exclude(link, href):
-            continue
-
-        # Check for PDF-like hrefs
-        if _is_pdf_href(href):
-            urls.append(abs_href)
-            continue
-
-        # Check for testimony-signalled links with download patterns
+    if "docs.house.gov" in href and _is_pdf_href(href):
+        return True
+    if _is_pdf_href(href):
         if _has_testimony_signal(link):
-            if "/download/" in href or "/services/files/" in href:
-                urls.append(abs_href)
-                continue
-            if re.search(r"\.\w{2,4}$", href.split("?")[0]):
-                urls.append(abs_href)
+            return True
+        if re.search(
+            r"/sites/default/files/|/uploads/|/documents/|/files/",
+            href, re.IGNORECASE,
+        ):
+            return True
+    return False
 
-    return _deduplicate_urls(urls)
 
+def _extract_links_from_containers(
+    html: str,
+    base_url: str,
+    container_fn: callable | None = None,
+    link_filter_fn: callable | None = None,
+) -> list[str]:
+    """Core link extraction logic shared by all platform extractors.
 
-# ---------------------------------------------------------------------------
-# wordpress_blog / wordpress_elementor
-# Senate Intelligence, HSGAC, Indian Affairs
-#
-# PDFs typically at /wp-content/uploads/YYYY/MM/{filename}.pdf
-# ---------------------------------------------------------------------------
-
-def _extract_wordpress(html: str, base_url: str) -> list[str]:
-    """Extract PDFs from WordPress-based Senate committee detail pages.
-
-    Common patterns:
-    - /wp-content/uploads/YYYY/MM/{filename}.pdf
-    - Direct .pdf links in the post body
+    Args:
+        html: Raw HTML of the detail page.
+        base_url: Base URL for resolving relative links.
+        container_fn: Optional function(soup) -> list[Tag] that returns
+            the container elements to search. If None, searches entire
+            document.  When containers are returned, each is searched
+            independently; duplicates across containers are suppressed.
+        link_filter_fn: Optional function(link_tag, href) -> bool that
+            decides whether to accept a non-excluded link. If None, uses
+            _accept_drupal_link (the most common pattern).
     """
     soup = BeautifulSoup(html, "lxml")
+    accept = link_filter_fn if link_filter_fn is not None else _accept_drupal_link
+
+    if container_fn is not None:
+        search_areas = container_fn(soup)
+        if not search_areas:
+            search_areas = [soup]
+    else:
+        search_areas = [soup]
+
     urls: list[str] = []
-
-    # WordPress content area selectors (try most specific first)
-    content_areas = (
-        soup.find_all("div", class_=re.compile(
-            r"entry-content|post-content|et_pb_text|elementor-widget-text|"
-            r"jet-listing-dynamic|page-content|article-body"
-        ))
-    )
-    # Fall back to the whole page if no content area found
-    search_scope = content_areas if content_areas else [soup]
-
-    for area in search_scope:
-        for link in area.find_all("a", href=True):
-            href = link.get("href", "")
-            abs_href = _abs_url(href, base_url)
-            if not abs_href:
-                continue
-
-            if _should_exclude(link, href):
-                continue
-
-            # Primary pattern: wp-content/uploads path with .pdf
-            if re.search(r"/wp-content/uploads/\d{4}/\d{2}/[^/]+\.pdf", href, re.IGNORECASE):
-                urls.append(abs_href)
-                continue
-
-            # General PDF links
-            if _is_pdf_href(href):
-                urls.append(abs_href)
-                continue
-
-            # Testimony-signalled links with file extensions
-            if _has_testimony_signal(link):
-                if re.search(r"\.\w{2,4}$", href.split("?")[0]):
-                    urls.append(abs_href)
-
-    return _deduplicate_urls(urls)
-
-
-# ---------------------------------------------------------------------------
-# coldfusion_table
-# Senate EPW, Small Business
-#
-# Files served via /public/?a=Files.Serve&File_id={GUID}
-# ---------------------------------------------------------------------------
-
-def _extract_coldfusion(html: str, base_url: str) -> list[str]:
-    """Extract PDFs from ColdFusion-based Senate detail pages.
-
-    Primary pattern:
-    - /public/?a=Files.Serve&File_id={GUID}
-    - Direct .pdf links
-    """
-    soup = BeautifulSoup(html, "lxml")
-    urls: list[str] = []
-
-    for link in soup.find_all("a", href=True):
-        href = link.get("href", "")
-        abs_href = _abs_url(href, base_url)
-        if not abs_href:
-            continue
-
-        if _should_exclude(link, href):
-            continue
-
-        # ColdFusion file serve pattern
-        if re.search(r"files\.serve", href, re.IGNORECASE):
-            urls.append(abs_href)
-            continue
-
-        # Standard PDF links
-        if _is_pdf_href(href):
-            urls.append(abs_href)
-            continue
-
-        # Testimony keyword links
-        if _has_testimony_signal(link):
-            if re.search(r"file_id=", href, re.IGNORECASE):
-                urls.append(abs_href)
-
-    return _deduplicate_urls(urls)
-
-
-# ---------------------------------------------------------------------------
-# evo_framework
-# House Appropriations, Foreign Affairs, Judiciary, Rules
-#
-# Links to docs.house.gov or committee-hosted PDFs containing
-# "testimony" or "statement" in the link text or URL.
-# ---------------------------------------------------------------------------
-
-def _extract_evo_framework(html: str, base_url: str) -> list[str]:
-    """Extract PDFs from House evo-framework detail pages.
-
-    Patterns:
-    - Links to docs.house.gov with .pdf extension
-    - Committee-hosted PDFs in /sites/default/files/ or /uploads/
-    - Links with "testimony" or "statement" in text pointing to PDFs
-    """
-    soup = BeautifulSoup(html, "lxml")
-    urls: list[str] = []
-
-    for link in soup.find_all("a", href=True):
-        href = link.get("href", "")
-        abs_href = _abs_url(href, base_url)
-        if not abs_href:
-            continue
-
-        if _should_exclude(link, href):
-            continue
-
-        # docs.house.gov PDF links
-        if "docs.house.gov" in href and _is_pdf_href(href):
-            urls.append(abs_href)
-            continue
-
-        # General PDF links
-        if _is_pdf_href(href):
-            # On House detail pages, accept PDFs with testimony signals
-            # or from known document paths
-            if _has_testimony_signal(link):
-                urls.append(abs_href)
-                continue
-            # Also accept PDFs from common document paths
-            if re.search(
-                r"/sites/default/files/|/uploads/|/documents/|/files/",
-                href, re.IGNORECASE,
-            ):
-                urls.append(abs_href)
-                continue
-
-        # Testimony keyword links to docs.house.gov (may not end in .pdf)
-        if "docs.house.gov" in href and _has_testimony_signal(link):
-            urls.append(abs_href)
-
-    return _deduplicate_urls(urls)
-
-
-# ---------------------------------------------------------------------------
-# aspnet_card
-# House Financial Services, Armed Services
-#
-# Similar to evo_framework. PDF links in hearing detail sections.
-# ---------------------------------------------------------------------------
-
-def _extract_aspnet_card(html: str, base_url: str) -> list[str]:
-    """Extract PDFs from ASP.NET card-style House detail pages.
-
-    Similar structure to evo_framework but may have different
-    container selectors.
-    """
-    soup = BeautifulSoup(html, "lxml")
-    urls: list[str] = []
-
-    # Look for document/testimony sections
-    sections = soup.find_all(
-        ["div", "section"],
-        class_=re.compile(r"document|testimony|witness|statement|download|attachment",
-                          re.IGNORECASE),
-    )
-    # Also search the full page
-    search_areas = sections + [soup] if sections else [soup]
-
     seen: set[str] = set()
+
     for area in search_areas:
         for link in area.find_all("a", href=True):
             href = link.get("href", "")
@@ -460,24 +315,108 @@ def _extract_aspnet_card(html: str, base_url: str) -> list[str]:
             if _should_exclude(link, href):
                 continue
 
-            # docs.house.gov PDF links
-            if "docs.house.gov" in href and _is_pdf_href(href):
+            if accept(link, href):
                 urls.append(abs_href)
-                continue
-
-            # General PDF links with testimony signal
-            if _is_pdf_href(href):
-                if _has_testimony_signal(link):
-                    urls.append(abs_href)
-                    continue
-                # Accept PDFs from document storage paths
-                if re.search(
-                    r"/sites/default/files/|/uploads/|/documents/|/files/",
-                    href, re.IGNORECASE,
-                ):
-                    urls.append(abs_href)
 
     return _deduplicate_urls(urls)
+
+
+# ===========================================================================
+#  Platform-specific extractors (thin wrappers)
+#
+#  Each function takes (html, base_url) and returns a list of absolute PDF
+#  URLs found on that detail page.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# drupal_table / new_senate_cms
+# Senate Finance, Banking, Budget, Appropriations, Foreign Relations, HELP,
+# Judiciary, Armed Services, Agriculture, Rules
+# ---------------------------------------------------------------------------
+
+def _extract_drupal_senate(html: str, base_url: str) -> list[str]:
+    """Extract testimony PDFs from Senate Drupal / new CMS detail pages."""
+    return _extract_links_from_containers(html, base_url)
+
+
+# ---------------------------------------------------------------------------
+# drupal_links
+# Senate Commerce, Energy, Veterans
+# ---------------------------------------------------------------------------
+
+def _extract_drupal_links(html: str, base_url: str) -> list[str]:
+    """Extract PDFs from Senate Drupal announcement-style detail pages."""
+    return _extract_links_from_containers(html, base_url)
+
+
+# ---------------------------------------------------------------------------
+# wordpress_blog / wordpress_elementor
+# Senate Intelligence, HSGAC, Indian Affairs
+# ---------------------------------------------------------------------------
+
+def _extract_wordpress(html: str, base_url: str) -> list[str]:
+    """Extract PDFs from WordPress-based Senate committee detail pages."""
+    def containers(soup: BeautifulSoup) -> list[Tag]:
+        return soup.find_all("div", class_=re.compile(
+            r"entry-content|post-content|et_pb_text|elementor-widget-text|"
+            r"jet-listing-dynamic|page-content|article-body"
+        ))
+    return _extract_links_from_containers(
+        html, base_url,
+        container_fn=containers,
+        link_filter_fn=_accept_wordpress_link,
+    )
+
+
+# ---------------------------------------------------------------------------
+# coldfusion_table
+# Senate EPW, Small Business
+# ---------------------------------------------------------------------------
+
+def _extract_coldfusion(html: str, base_url: str) -> list[str]:
+    """Extract PDFs from ColdFusion-based Senate detail pages."""
+    return _extract_links_from_containers(
+        html, base_url,
+        link_filter_fn=_accept_coldfusion_link,
+    )
+
+
+# ---------------------------------------------------------------------------
+# evo_framework
+# House Appropriations, Foreign Affairs, Judiciary, Rules
+# ---------------------------------------------------------------------------
+
+def _extract_evo_framework(html: str, base_url: str) -> list[str]:
+    """Extract PDFs from House evo-framework detail pages."""
+    return _extract_links_from_containers(
+        html, base_url,
+        link_filter_fn=_accept_house_link,
+    )
+
+
+# ---------------------------------------------------------------------------
+# aspnet_card
+# House Financial Services, Armed Services
+# ---------------------------------------------------------------------------
+
+def _extract_aspnet_card(html: str, base_url: str) -> list[str]:
+    """Extract PDFs from ASP.NET card-style House detail pages."""
+    def containers(soup: BeautifulSoup) -> list[Tag]:
+        sections = soup.find_all(
+            ["div", "section"],
+            class_=re.compile(
+                r"document|testimony|witness|statement|download|attachment",
+                re.IGNORECASE,
+            ),
+        )
+        # Search matching sections first, then the full page
+        return sections + [soup] if sections else []
+    return _extract_links_from_containers(
+        html, base_url,
+        container_fn=containers,
+        link_filter_fn=_accept_aspnet_link,
+    )
 
 
 # ---------------------------------------------------------------------------

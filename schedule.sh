@@ -31,7 +31,7 @@ LOG_FILE="$LOG_DIR/run-$(date +%Y-%m-%d).log"
 
 # ── Run the pipeline ────────────────────────────────────────────────────
 echo "=== hearing-transcript run started at $(date -u '+%Y-%m-%dT%H:%M:%SZ') ===" | tee -a "$LOG_FILE"
-python run.py --days 2 2>&1 | tee -a "$LOG_FILE"
+python3 run.py --days 2 2>&1 | tee -a "$LOG_FILE"
 EXIT_CODE=${PIPESTATUS[0]}
 echo "=== run finished at $(date -u '+%Y-%m-%dT%H:%M:%SZ') exit=$EXIT_CODE ===" | tee -a "$LOG_FILE"
 

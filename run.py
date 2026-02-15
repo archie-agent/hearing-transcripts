@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import threading
 import sys
@@ -129,7 +130,9 @@ def _migrate_hearing_id(old_id: str, hearing: Hearing, state: State) -> None:
                 entry["title"] = hearing.title
                 entry["path"] = f"{hearing.committee_key}/{hearing.date}_{new_id}"
                 break
-        index_path.write_text(json.dumps(index, indent=2))
+        tmp = index_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(index, indent=2))
+        os.replace(tmp, index_path)
 
 
 def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
@@ -160,6 +163,13 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
         "outputs": {},
         "cost": cost,
     }
+
+    # Step lifecycle:
+    #   "not started" = step not in state DB (is_step_done returns False)
+    #   "done"        = step completed (success or intentional skip)
+    # Only mark "done" when the step genuinely completed or was intentionally
+    # skipped (e.g. no YouTube URL means captions can't run — mark done so we
+    # don't retry).  Leave unmarked if a future run might provide the input.
 
     # 1. YouTube captions + LLM cleanup
     youtube_url = hearing.sources.get("youtube_url")
@@ -334,7 +344,9 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
     meta = {k: v for k, v in result.items()}
     meta["processed_at"] = datetime.now(timezone.utc).isoformat()
     meta_path = hearing_dir / "meta.json"
-    meta_path.write_text(json.dumps(meta, indent=2))
+    tmp = meta_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(meta, indent=2))
+    os.replace(tmp, meta_path)
 
     # Publish to transcripts/ canonical archive
     _publish_to_transcripts(hearing, hearing_dir, result)
@@ -442,7 +454,9 @@ def _update_index(results: list[dict]) -> None:
             existing["hearings"].append(entry)
 
     existing["last_updated"] = datetime.now(timezone.utc).isoformat()
-    index_path.write_text(json.dumps(existing, indent=2))
+    tmp = index_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(existing, indent=2))
+    os.replace(tmp, index_path)
     log.info("Index updated: %s (%d hearings)", index_path, len(existing["hearings"]))
 
 

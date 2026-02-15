@@ -23,6 +23,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
+import httpx
+
 import config
 from cleanup import (
     _call_openrouter,
@@ -160,7 +163,7 @@ def extract_quotes_from_transcript(
     all_quotes: list[Quote] = []
     total_cost = 0.0
 
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
         prompt = EXTRACT_PROMPT.format(text=chunk)
         try:
             response = _call_openrouter(prompt, config.DIGEST_MODEL, api_key)
@@ -174,8 +177,10 @@ def extract_quotes_from_transcript(
             total_cost += cost
 
             raw = response["choices"][0]["message"]["content"]
-        except Exception:
-            logger.exception("API/parse error extracting quotes for %s", hearing["id"])
+        except (httpx.HTTPError, KeyError, IndexError) as e:
+            logger.warning(
+                "Quote extraction failed for chunk %d of %s: %s", i, hearing["id"], e
+            )
             continue
 
         # Strip markdown code fences if present
@@ -294,9 +299,11 @@ def compose_digest(quotes: list[Quote], api_key: str) -> tuple[str, float]:
             usage.get("completion_tokens", 0),
         )
         body = response["choices"][0]["message"]["content"]
-    except Exception:
-        logger.exception("Failed to compose digest")
+    except httpx.HTTPError as e:
+        logger.warning("Transient HTTP error composing digest: %s", e)
         return "", 0.0
+    except (KeyError, IndexError) as e:
+        raise ValueError(f"Unexpected API response shape in compose_digest: {e}") from e
 
     logger.info("Composed digest (%d chars, $%.4f)", len(body), cost)
     return body, cost
@@ -323,6 +330,7 @@ def polish_digest(body: str, api_key: str) -> tuple[str, float]:
     """Polish the digest with Claude Haiku. Returns (polished, cost)."""
     prompt = POLISH_PROMPT.format(body=body)
 
+    cost = 0.0
     try:
         response = _call_openrouter(prompt, config.DIGEST_POLISH_MODEL, api_key, timeout=120.0)
         usage = response.get("usage", {})
@@ -332,9 +340,12 @@ def polish_digest(body: str, api_key: str) -> tuple[str, float]:
             usage.get("completion_tokens", 0),
         )
         polished = response["choices"][0]["message"]["content"]
-    except Exception:
-        logger.exception("Polish step failed, using unpolished version")
-        return body, 0.0
+    except httpx.HTTPError as e:
+        logger.warning("Polish step failed (transient HTTP error), using unpolished version: %s", e)
+        return body, cost
+    except (KeyError, IndexError) as e:
+        logger.warning("Polish step got unexpected response shape, using unpolished version: %s", e)
+        return body, cost
 
     logger.info("Polished digest (%d chars, $%.4f)", len(polished), cost)
     return polished, cost
@@ -500,14 +511,8 @@ def deliver_digest(
         print(markdown)
         return True
 
-    # Load AgentMail API key
-    env_file = Path.home() / ".env.agentmail"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            if line.startswith("AGENTMAIL_API_KEY="):
-                os.environ["AGENTMAIL_API_KEY"] = line.split("=", 1)[1]
-                break
-
+    # Load AgentMail API key from ~/.env.agentmail (won't override existing env vars)
+    load_dotenv(Path.home() / ".env.agentmail")
     api_key = os.environ.get("AGENTMAIL_API_KEY")
     if not api_key:
         logger.error("AGENTMAIL_API_KEY not found — cannot send email")

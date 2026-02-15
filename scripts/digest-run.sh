@@ -11,6 +11,10 @@ LOG_DIR="/Users/agent/data/hearing-transcripts/logs"
 mkdir -p "$LOG_DIR"
 
 # Activate venv
+if [[ ! -f "$VENV/bin/activate" ]]; then
+    echo "ERROR: venv not found at $VENV" >&2
+    exit 1
+fi
 source "$VENV/bin/activate"
 
 cd "$PROJECT_DIR"

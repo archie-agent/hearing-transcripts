@@ -37,7 +37,12 @@ def download_pdf(url: str, output_dir: Path, filename: str | None = None) -> Pat
 
 
 def extract_text_from_pdf(pdf_path: Path) -> str:
-    """Extract text from a PDF using pymupdf4llm. Handles multi-column GPO layouts."""
+    """Extract text from a PDF using pymupdf4llm. Handles multi-column GPO layouts.
+
+    Returns the extracted text (may be empty for genuinely blank PDFs).
+    Raises on library/unexpected errors so the caller can distinguish
+    "valid PDF, no text" from "extraction crashed".
+    """
     try:
         import pymupdf4llm
         text = pymupdf4llm.to_markdown(str(pdf_path))
@@ -45,20 +50,16 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
     except ImportError:
         log.warning("pymupdf4llm not installed, falling back to pymupdf")
     except Exception as e:
-        log.warning("pymupdf4llm extraction failed: %s, falling back", e)
+        log.warning("pymupdf4llm extraction failed: %s, falling back to pymupdf", e)
 
     # Fallback to basic pymupdf
-    try:
-        import pymupdf
-        doc = pymupdf.open(str(pdf_path))
-        pages = []
-        for page in doc:
-            pages.append(page.get_text())
-        doc.close()
-        return "\n\n".join(pages)
-    except Exception as e:
-        log.error("PDF extraction failed entirely: %s", e)
-        return ""
+    import pymupdf
+    doc = pymupdf.open(str(pdf_path))
+    pages = []
+    for page in doc:
+        pages.append(page.get_text())
+    doc.close()
+    return "\n\n".join(pages)
 
 
 def process_testimony_pdfs(pdf_urls: list[str], output_dir: Path) -> list[dict]:

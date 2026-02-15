@@ -10,7 +10,14 @@ LOG_DIR="/Users/agent/data/hearing-transcripts/logs"
 
 mkdir -p "$LOG_DIR"
 
+# Retain logs for 30 days
+find "$LOG_DIR" -name "*.log" -mtime +30 -delete 2>/dev/null || true
+
 # Activate venv
+if [[ ! -f "$VENV/bin/activate" ]]; then
+    echo "ERROR: venv not found at $VENV" >&2
+    exit 1
+fi
 source "$VENV/bin/activate"
 
 # Run the pipeline: 3-day lookback, default tier (<=2).

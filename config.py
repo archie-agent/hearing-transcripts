@@ -51,6 +51,8 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
 # Runs via OpenRouter. Set to "" to skip cleanup.
 CLEANUP_MODEL = os.environ.get("CLEANUP_MODEL", "google/gemini-3-flash-preview")
 
+TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
+
 # ---------------------------------------------------------------------------
 # Transcription settings
 # ---------------------------------------------------------------------------
