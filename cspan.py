@@ -570,6 +570,7 @@ def _extract_search_keywords(title: str, max_words: int = 5) -> str:
 def discover_cspan_google(
     hearings: list[dict],
     max_searches: int = 200,
+    client: httpx.Client | None = None,
 ) -> list[dict]:
     """Find C-SPAN URLs via DuckDuckGo HTML search. No WAF cost.
 
@@ -579,6 +580,7 @@ def discover_cspan_google(
     Args:
         hearings: [{id, title, date, committee_key, committee_name}, ...]
         max_searches: cap on DDG queries per run
+        client: Optional shared httpx.Client (caller manages lifecycle)
 
     Returns:
         [{hearing_id, cspan_url, program_id}, ...]
@@ -627,25 +629,28 @@ def discover_cspan_google(
         _time.sleep(_DDG_DELAY)
         searches += 1
 
-        try:
-            resp = httpx.post(
+        def _ddg_post(q: str) -> httpx.Response:
+            if client is not None:
+                return client.post(
+                    "https://html.duckduckgo.com/html/",
+                    data={"q": q},
+                    headers={"User-Agent": _UA},
+                )
+            return httpx.post(
                 "https://html.duckduckgo.com/html/",
-                data={"q": query},
+                data={"q": q},
                 headers={"User-Agent": _UA},
                 follow_redirects=True,
                 timeout=15.0,
             )
+
+        try:
+            resp = _ddg_post(query)
             if resp.status_code == 202:
                 # DDG returns 202 when rate-limited; back off and retry once
                 log.debug("DDG rate-limited (202), backing off 10s...")
                 _time.sleep(10)
-                resp = httpx.post(
-                    "https://html.duckduckgo.com/html/",
-                    data={"q": query},
-                    headers={"User-Agent": _UA},
-                    follow_redirects=True,
-                    timeout=15.0,
-                )
+                resp = _ddg_post(query)
             if resp.status_code != 200:
                 log.debug("DDG search returned %d for '%s'",
                           resp.status_code, keywords[:40])

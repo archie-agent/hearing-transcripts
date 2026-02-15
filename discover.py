@@ -77,29 +77,35 @@ class Hearing:
 # HTTP client with retries
 # ---------------------------------------------------------------------------
 
-def _http_get(url: str, timeout: float = 20.0) -> httpx.Response | None:
+def _http_get(url: str, timeout: float = 20.0,
+              client: httpx.Client | None = None) -> httpx.Response | None:
     """Fetch a URL with retries, rate limiting, and 429 backoff. Returns None on failure."""
     _rate_limiter.wait(urlparse(url).netloc)
-    transport = httpx.HTTPTransport(retries=2)
+
+    def _do_get(c: httpx.Client) -> httpx.Response | None:
+        resp = c.get(url)
+        if resp.status_code == 429:
+            try:
+                retry_after = int(resp.headers.get("Retry-After", "5"))
+            except (ValueError, TypeError):
+                retry_after = 5
+            retry_after = min(retry_after, 60)
+            log.debug("HTTP 429 for %s, waiting %ds", url, retry_after)
+            _time.sleep(retry_after)
+            resp = c.get(url)
+        if resp.status_code != 200:
+            log.warning("HTTP %s for %s", resp.status_code, url)
+            return None
+        return resp
+
     try:
+        if client is not None:
+            return _do_get(client)
+        transport = httpx.HTTPTransport(retries=2)
         with httpx.Client(transport=transport, timeout=timeout,
                           follow_redirects=True,
-                          headers={"User-Agent": USER_AGENT}) as client:
-            resp = client.get(url)
-            # Handle 429 Too Many Requests with backoff
-            if resp.status_code == 429:
-                try:
-                    retry_after = int(resp.headers.get("Retry-After", "5"))
-                except (ValueError, TypeError):
-                    retry_after = 5
-                retry_after = min(retry_after, 60)  # cap at 60s
-                log.debug("HTTP 429 for %s, waiting %ds", url, retry_after)
-                _time.sleep(retry_after)
-                resp = client.get(url)
-            if resp.status_code != 200:
-                log.warning("HTTP %s for %s", resp.status_code, url)
-                return None
-            return resp
+                          headers={"User-Agent": USER_AGENT}) as c:
+            return _do_get(c)
     except (httpx.HTTPError, OSError) as e:
         log.warning("HTTP error for %s: %s", url, e)
         return None

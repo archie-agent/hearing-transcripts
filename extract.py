@@ -15,7 +15,8 @@ import config
 log = logging.getLogger(__name__)
 
 
-def download_pdf(url: str, output_dir: Path, filename: str | None = None) -> Path | None:
+def download_pdf(url: str, output_dir: Path, filename: str | None = None,
+                 client: httpx.Client | None = None) -> Path | None:
     """Download a PDF from a URL."""
     if not filename:
         # Derive filename from URL
@@ -26,7 +27,10 @@ def download_pdf(url: str, output_dir: Path, filename: str | None = None) -> Pat
 
     pdf_path = output_dir / filename
     try:
-        resp = httpx.get(url, timeout=60, follow_redirects=True)
+        if client is not None:
+            resp = client.get(url)
+        else:
+            resp = httpx.get(url, timeout=60, follow_redirects=True)
         if resp.status_code != 200:
             log.warning("PDF download failed (%s): %s", resp.status_code, url)
             return None
@@ -109,7 +113,8 @@ def process_testimony_pdfs(pdf_urls: list[str], output_dir: Path) -> list[dict]:
     return results
 
 
-def fetch_govinfo_transcript(package_id: str, output_dir: Path) -> Path | None:
+def fetch_govinfo_transcript(package_id: str, output_dir: Path,
+                             client: httpx.Client | None = None) -> Path | None:
     """Download the official GPO transcript text from GovInfo API.
 
     Tries direct package endpoints (htm, then pdf) since the summary download
@@ -121,7 +126,10 @@ def fetch_govinfo_transcript(package_id: str, output_dir: Path) -> Path | None:
     for ext in ("htm", "pdf"):
         url = f"https://api.govinfo.gov/packages/{package_id}/{ext}"
         try:
-            resp = httpx.get(url, params={"api_key": api_key}, timeout=120, follow_redirects=True)
+            if client is not None:
+                resp = client.get(url, params={"api_key": api_key})
+            else:
+                resp = httpx.get(url, params={"api_key": api_key}, timeout=120, follow_redirects=True)
             if resp.status_code != 200:
                 continue
 

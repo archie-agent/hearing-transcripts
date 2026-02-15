@@ -129,6 +129,7 @@ def call_openrouter(
     model: str,
     api_key: str,
     timeout: float = 120.0,
+    client: httpx.Client | None = None,
 ) -> dict[str, Any]:
     """Call OpenRouter API.
 
@@ -137,6 +138,7 @@ def call_openrouter(
         model: Model identifier
         api_key: OpenRouter API key
         timeout: Request timeout in seconds
+        client: Optional shared httpx.Client (caller manages lifecycle)
 
     Returns:
         API response as dict
@@ -160,7 +162,12 @@ def call_openrouter(
         ],
     }
 
-    with httpx.Client(timeout=timeout) as client:
+    if client is not None:
         response = client.post(OPENROUTER_API_URL, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
+    with httpx.Client(timeout=timeout) as c:
+        response = c.post(OPENROUTER_API_URL, json=payload, headers=headers)
         response.raise_for_status()
         return response.json()
