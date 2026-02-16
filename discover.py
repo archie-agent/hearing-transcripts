@@ -795,7 +795,7 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
         # date is typically ISO format like "2026-02-05T15:00:00Z"
         try:
             date_formatted = date_str[:10]  # YYYY-MM-DD
-            meeting_date = datetime.strptime(date_formatted, "%Y-%m-%d")
+            meeting_date = datetime.strptime(date_formatted, "%Y-%m-%d").replace(tzinfo=timezone.utc)
             if meeting_date < cutoff:
                 return None
             # Skip future placeholder entries (date > 30 days out)
