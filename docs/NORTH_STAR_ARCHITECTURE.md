@@ -203,6 +203,15 @@ Phase 5:
 - Alerting thresholds tied to measurable SLOs (e.g., max queue age, failure rate).
 - Runbooks document replay/requeue commands and expected outcomes.
 
+## Progress snapshot (2026-02-21)
+
+- Phase 1 complete: queue scaffolding tables and queue run audit ledger are in `state.py`.
+- Phase 2 complete: stage dual-write is active for `captions`, `isvp`, `cspan`, `testimony`, `govinfo`, and `publish`.
+- Phase 3 complete: `run.py` supports `--enqueue-only` and `--drain-only` with leased hearing job claims.
+- Phase 4 complete: transcript publish emits durable outbox events; `digest.py` supports `--consume-outbox`.
+- Phase 5 complete: `run.py --queue-health`, `--requeue-hearing-job`, and `--requeue-outbox-event` are available.
+- Phase 6 in progress: scheduler scripts support producer/worker and outbox modes behind feature flags.
+
 ## Next actions and docs to update
 
 Immediate implementation order:

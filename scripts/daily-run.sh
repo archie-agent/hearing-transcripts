@@ -25,8 +25,24 @@ source "$VENV/bin/activate"
 # --workers 1: serialized to avoid C-SPAN WAF captcha storms during unattended runs.
 cd "$PROJECT_DIR"
 LOG_FILE="$LOG_DIR/$(date +%Y-%m-%d).log"
-python3 run.py --days 3 --workers 1 2>&1 | tee "$LOG_FILE"
-RC="${PIPESTATUS[0]}"
+
+if [[ "${QUEUE_READ_ENABLED:-0}" == "1" ]]; then
+    # Producer/worker topology (north-star cutover path)
+    python3 run.py --enqueue-only --days 3 --workers 1 2>&1 | tee "$LOG_FILE"
+    RC_ENQUEUE="${PIPESTATUS[0]}"
+    if [[ "$RC_ENQUEUE" -ne 0 ]]; then
+        RC="$RC_ENQUEUE"
+    else
+        DRAIN_MAX_TASKS="${DRAIN_MAX_TASKS:-60}"
+        LEASE_SECONDS="${LEASE_SECONDS:-900}"
+        python3 run.py --drain-only --workers 1 --max-tasks "$DRAIN_MAX_TASKS" --lease-seconds "$LEASE_SECONDS" 2>&1 | tee -a "$LOG_FILE"
+        RC="${PIPESTATUS[0]}"
+    fi
+else
+    # Monolith fallback (rollback-safe default)
+    python3 run.py --days 3 --workers 1 2>&1 | tee "$LOG_FILE"
+    RC="${PIPESTATUS[0]}"
+fi
 
 if [ "$RC" -ne 0 ]; then
     # Extract last error line from log for the notification

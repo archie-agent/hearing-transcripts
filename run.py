@@ -649,6 +649,9 @@ def main():
     if (args.enqueue_only or args.drain_only) and not queue_write_enabled:
         log.error("Queue mode requires QUEUE_WRITE_ENABLED=1")
         sys.exit(1)
+    if args.drain_only and not config.QUEUE_READ_ENABLED:
+        log.error("Drain mode requires QUEUE_READ_ENABLED=1")
+        sys.exit(1)
     if queue_write_enabled:
         state.record_queue_run_start(run_id=run_id, role="monolith", args=vars(args))
 
