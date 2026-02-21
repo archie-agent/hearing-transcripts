@@ -20,10 +20,20 @@ source "$VENV/bin/activate"
 
 cd "$PROJECT_DIR"
 LOG_FILE="$LOG_DIR/digest-$(date +%Y-%m-%d).log"
-if [[ "${OUTBOX_DIGEST_ENABLED:-0}" == "1" ]]; then
-    python3 digest.py --consume-outbox 2>&1 | tee "$LOG_FILE"
-else
+if [[ "${DIGEST_USE_LEGACY_INDEX:-0}" == "1" ]]; then
+    # Rollback path: scan transcripts/index.json directly.
     python3 digest.py 2>&1 | tee "$LOG_FILE"
+else
+    # Default path: consume transcript_published events from delivery outbox.
+    OUTBOX_MAX_EVENTS="${OUTBOX_MAX_EVENTS:-20}"
+    OUTBOX_LEASE_SECONDS="${OUTBOX_LEASE_SECONDS:-900}"
+    OUTBOX_WORKER_ID="${OUTBOX_WORKER_ID:-digest-cron}"
+    OUTBOX_DIGEST_ENABLED=1 python3 digest.py \
+        --consume-outbox \
+        --max-events "$OUTBOX_MAX_EVENTS" \
+        --lease-seconds "$OUTBOX_LEASE_SECONDS" \
+        --worker-id "$OUTBOX_WORKER_ID" \
+        2>&1 | tee "$LOG_FILE"
 fi
 RC="${PIPESTATUS[0]}"
 

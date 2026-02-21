@@ -62,16 +62,16 @@ python run.py --drain-only --worker-id worker-a
 
 ## Outbox Consumer
 
-Enable outbox mode and consume transcript publication events:
+Consume transcript publication events from outbox:
 
 ```bash
-OUTBOX_DIGEST_ENABLED=1 python digest.py --consume-outbox --max-events 20
+python digest.py --consume-outbox --max-events 20
 ```
 
 Dry-run consumer:
 
 ```bash
-OUTBOX_DIGEST_ENABLED=1 python digest.py --consume-outbox --dry-run
+python digest.py --consume-outbox --dry-run
 ```
 
 ## Replay / Requeue
@@ -115,10 +115,10 @@ Disable queue read path:
 export QUEUE_READ_ENABLED=0
 ```
 
-Disable outbox consumer path:
+Force scheduler rollback to legacy digest index scan:
 
 ```bash
-export OUTBOX_DIGEST_ENABLED=0
+export DIGEST_USE_LEGACY_INDEX=1
 ```
 
 Return to monolithic processing:
