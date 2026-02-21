@@ -386,3 +386,88 @@ class TestQueueScaffolding:
         assert row is not None
         assert row["status"] == "running"
         assert row["attempt_count"] == 2
+
+
+class TestHearingJobQueue:
+    def test_enqueue_and_claim_and_complete(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.record_hearing("h1", "house.judiciary", "2026-02-10", "Hearing", "slug", {})
+        queued = st.enqueue_hearing_job(
+            hearing_id="h1",
+            run_id="run-1",
+            committee_key="house.judiciary",
+            hearing_date="2026-02-10",
+            title="Hearing",
+        )
+        assert queued is True
+
+        claimed = st.claim_hearing_jobs(worker_id="worker-a", limit=5, lease_seconds=120)
+        assert len(claimed) == 1
+        assert claimed[0]["hearing_id"] == "h1"
+        assert claimed[0]["status"] == "running"
+
+        st.complete_hearing_job("h1")
+        row = st._get_conn().execute(
+            "SELECT status, completed_at FROM hearing_jobs WHERE hearing_id = ?",
+            ("h1",),
+        ).fetchone()
+        assert row["status"] == "done"
+        assert row["completed_at"] is not None
+
+    def test_fail_requeues_until_max_attempts_then_terminal(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.record_hearing("h2", "house.judiciary", "2026-02-10", "Hearing", "slug", {})
+        st.enqueue_hearing_job(
+            hearing_id="h2",
+            run_id="run-1",
+            committee_key="house.judiciary",
+            hearing_date="2026-02-10",
+            title="Hearing",
+        )
+        st._get_conn().execute(
+            "UPDATE hearing_jobs SET max_attempts = 2 WHERE hearing_id = ?",
+            ("h2",),
+        )
+        st._get_conn().commit()
+
+        claim_1 = st.claim_hearing_jobs(worker_id="worker-a", limit=1, lease_seconds=30)
+        assert len(claim_1) == 1
+        st.fail_hearing_job("h2", "first")
+        row_1 = st._get_conn().execute(
+            "SELECT status, attempt_count, last_error FROM hearing_jobs WHERE hearing_id = ?",
+            ("h2",),
+        ).fetchone()
+        assert row_1["status"] == "pending"
+        assert row_1["attempt_count"] == 1
+        assert row_1["last_error"] == "first"
+
+        st._get_conn().execute(
+            "UPDATE hearing_jobs SET available_at = ? WHERE hearing_id = ?",
+            ("1970-01-01T00:00:00+00:00", "h2"),
+        )
+        st._get_conn().commit()
+        claim_2 = st.claim_hearing_jobs(worker_id="worker-b", limit=1, lease_seconds=30)
+        assert len(claim_2) == 1
+        st.fail_hearing_job("h2", "second")
+        row_2 = st._get_conn().execute(
+            "SELECT status, attempt_count, last_error FROM hearing_jobs WHERE hearing_id = ?",
+            ("h2",),
+        ).fetchone()
+        assert row_2["status"] == "failed"
+        assert row_2["attempt_count"] == 2
+        assert row_2["last_error"] == "second"
+
+    def test_get_hearing_parses_sources_json(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.record_hearing(
+            "h3",
+            "senate.finance",
+            "2026-02-11",
+            "Budget",
+            "slug",
+            {"youtube_url": "https://youtube.com/watch?v=abc123"},
+        )
+        row = st.get_hearing("h3")
+        assert row is not None
+        assert row["id"] == "h3"
+        assert row["sources"]["youtube_url"] == "https://youtube.com/watch?v=abc123"

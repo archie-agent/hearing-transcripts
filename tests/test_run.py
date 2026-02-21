@@ -32,6 +32,49 @@ def _make_state() -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
+# _hearing_from_state_row
+# ---------------------------------------------------------------------------
+
+class TestHearingFromStateRow:
+
+    def test_builds_hearing_with_committee_name_from_config(self):
+        from run import _hearing_from_state_row
+
+        row = {
+            "id": "h1",
+            "committee_key": "house.judiciary",
+            "date": "2026-02-10",
+            "title": "AI Hearing",
+            "sources": {"youtube_url": "https://youtube.com/watch?v=abc123"},
+        }
+
+        with patch("run.config.get_committee_meta", return_value={"name": "House Judiciary"}):
+            hearing = _hearing_from_state_row(row)
+
+        assert hearing.committee_name == "House Judiciary"
+        assert hearing.committee_key == "house.judiciary"
+        assert hearing.date == "2026-02-10"
+        assert hearing.title == "AI Hearing"
+        assert hearing.sources["youtube_url"] == "https://youtube.com/watch?v=abc123"
+
+    def test_falls_back_to_committee_key_when_meta_missing(self):
+        from run import _hearing_from_state_row
+
+        row = {
+            "id": "h2",
+            "committee_key": "unknown.committee",
+            "date": "2026-02-11",
+            "title": "Unknown Committee Hearing",
+            "sources": {},
+        }
+
+        with patch("run.config.get_committee_meta", return_value=None):
+            hearing = _hearing_from_state_row(row)
+
+        assert hearing.committee_name == "unknown.committee"
+
+
+# ---------------------------------------------------------------------------
 # _reconcile_hearing_id
 # ---------------------------------------------------------------------------
 

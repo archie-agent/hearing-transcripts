@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -677,6 +677,195 @@ class State:
         args_json = result.get("args_json")
         if args_json:
             result["args"] = json.loads(args_json)
+        return result
+
+    # ------------------------------------------------------------------
+    # Hearing job queue (phase 3 producer/worker cutover)
+    # ------------------------------------------------------------------
+
+    def enqueue_hearing_job(
+        self,
+        hearing_id: str,
+        run_id: str,
+        committee_key: str,
+        hearing_date: str,
+        title: str,
+    ) -> bool:
+        """Enqueue a hearing for worker processing. Returns True if queued."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute(
+            "SELECT status FROM hearing_jobs WHERE hearing_id = ?",
+            (hearing_id,),
+        )
+        row = cursor.fetchone()
+        if row is not None and row["status"] in ("done", "running"):
+            return False
+
+        if row is None:
+            conn.execute("""
+                INSERT INTO hearing_jobs
+                    (hearing_id, run_id, committee_key, hearing_date, title,
+                     status, available_at, enqueued_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+            """, (hearing_id, run_id, committee_key, hearing_date, title, now, now))
+        else:
+            conn.execute("""
+                UPDATE hearing_jobs
+                SET run_id = ?,
+                    committee_key = ?,
+                    hearing_date = ?,
+                    title = ?,
+                    status = 'pending',
+                    available_at = ?,
+                    claimed_by = NULL,
+                    lease_expires_at = NULL,
+                    last_error = NULL
+                WHERE hearing_id = ?
+            """, (run_id, committee_key, hearing_date, title, now, hearing_id))
+        conn.commit()
+        return True
+
+    def reclaim_expired_hearing_job_leases(self) -> int:
+        """Move expired running hearing jobs back to pending."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute("""
+            UPDATE hearing_jobs
+            SET status = 'pending',
+                claimed_by = NULL,
+                lease_expires_at = NULL,
+                available_at = ?,
+                last_error = COALESCE(last_error, 'lease expired')
+            WHERE status = 'running'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < ?
+        """, (now, now))
+        conn.commit()
+        return cursor.rowcount
+
+    def claim_hearing_jobs(
+        self,
+        worker_id: str,
+        limit: int = 1,
+        lease_seconds: int = 900,
+    ) -> list[dict]:
+        """Claim pending hearing jobs for a worker, returning claimed rows."""
+        conn = self._get_conn()
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_until = (now_dt + timedelta(seconds=max(lease_seconds, 1))).isoformat()
+
+        self.reclaim_expired_hearing_job_leases()
+
+        cursor = conn.execute("""
+            SELECT hearing_id
+            FROM hearing_jobs
+            WHERE status = 'pending'
+              AND (available_at IS NULL OR available_at <= ?)
+            ORDER BY available_at ASC, hearing_date ASC
+            LIMIT ?
+        """, (now, limit))
+        hearing_ids = [row["hearing_id"] for row in cursor.fetchall()]
+        if not hearing_ids:
+            return []
+
+        claimed: list[dict] = []
+        for hearing_id in hearing_ids:
+            update = conn.execute("""
+                UPDATE hearing_jobs
+                SET status = 'running',
+                    claimed_by = ?,
+                    lease_expires_at = ?,
+                    started_at = COALESCE(started_at, ?),
+                    attempt_count = attempt_count + 1
+                WHERE hearing_id = ?
+                  AND status = 'pending'
+                  AND (available_at IS NULL OR available_at <= ?)
+            """, (worker_id, lease_until, now, hearing_id, now))
+            if update.rowcount == 0:
+                continue
+
+            row = conn.execute("""
+                SELECT hearing_id, run_id, committee_key, hearing_date, title,
+                       status, attempt_count, max_attempts, claimed_by, lease_expires_at
+                FROM hearing_jobs
+                WHERE hearing_id = ?
+            """, (hearing_id,)).fetchone()
+            if row:
+                claimed.append(dict(row))
+
+        conn.commit()
+        return claimed
+
+    def complete_hearing_job(self, hearing_id: str) -> None:
+        """Mark a claimed hearing job as done."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("""
+            UPDATE hearing_jobs
+            SET status = 'done',
+                completed_at = ?,
+                claimed_by = NULL,
+                lease_expires_at = NULL,
+                last_error = NULL
+            WHERE hearing_id = ?
+        """, (now, hearing_id))
+        conn.commit()
+
+    def fail_hearing_job(self, hearing_id: str, error: str, base_delay_seconds: int = 90) -> None:
+        """Record hearing job failure and either retry later or mark terminal failure."""
+        conn = self._get_conn()
+        row = conn.execute("""
+            SELECT attempt_count, max_attempts
+            FROM hearing_jobs
+            WHERE hearing_id = ?
+        """, (hearing_id,)).fetchone()
+        if row is None:
+            return
+
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        attempt_count = int(row["attempt_count"] or 0)
+        max_attempts = int(row["max_attempts"] or 5)
+        if attempt_count >= max_attempts:
+            conn.execute("""
+                UPDATE hearing_jobs
+                SET status = 'failed',
+                    completed_at = ?,
+                    claimed_by = NULL,
+                    lease_expires_at = NULL,
+                    last_error = ?
+                WHERE hearing_id = ?
+            """, (now, error, hearing_id))
+        else:
+            delay_seconds = base_delay_seconds * (2 ** max(attempt_count - 1, 0))
+            delay_seconds = min(delay_seconds, 3600)
+            available_at = (now_dt + timedelta(seconds=delay_seconds)).isoformat()
+            conn.execute("""
+                UPDATE hearing_jobs
+                SET status = 'pending',
+                    available_at = ?,
+                    claimed_by = NULL,
+                    lease_expires_at = NULL,
+                    last_error = ?
+                WHERE hearing_id = ?
+            """, (available_at, error, hearing_id))
+        conn.commit()
+
+    def get_hearing(self, hearing_id: str) -> dict | None:
+        """Fetch hearing metadata by hearing_id."""
+        conn = self._get_conn()
+        row = conn.execute("""
+            SELECT id, committee_key, date, title, slug, sources_json, congress_event_id
+            FROM hearings
+            WHERE id = ?
+        """, (hearing_id,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        sources_json = result.pop("sources_json", "{}")
+        result["sources"] = json.loads(sources_json) if sources_json else {}
         return result
 
     def get_unprocessed_hearings(self) -> list[dict]:

@@ -134,6 +134,20 @@ def _mark_stage_task(
     )
 
 
+def _hearing_from_state_row(row: dict) -> Hearing:
+    """Build a Hearing object from a state DB row."""
+    committee_key = row["committee_key"]
+    committee_meta = config.get_committee_meta(committee_key) or {}
+    committee_name = committee_meta.get("name", committee_key)
+    return Hearing(
+        committee_key=committee_key,
+        committee_name=committee_name,
+        title=row["title"],
+        date=row["date"],
+        sources=row.get("sources", {}),
+    )
+
+
 def _step_youtube_captions(hearing: Hearing, state: State, hearing_dir: Path,
                            result: dict, cost: dict) -> None:
     """Step 1: YouTube captions + LLM cleanup."""
@@ -538,8 +552,20 @@ def main():
     parser.add_argument("--max-cost", type=float, default=None, help="Max LLM cost per run in USD")
     parser.add_argument("--workers", type=int, default=3, help="Parallel hearing processing workers")
     parser.add_argument("--reprocess", action="store_true", help="Re-process already processed hearings")
+    parser.add_argument("--enqueue-only", action="store_true", help="Discover hearings and enqueue queue jobs only")
+    parser.add_argument("--drain-only", action="store_true", help="Drain queued hearing jobs without running discovery")
+    parser.add_argument("--worker-id", type=str, default=None, help="Worker identity when using --drain-only")
+    parser.add_argument("--max-tasks", type=int, default=20, help="Max queued hearing jobs to claim in one drain run")
+    parser.add_argument("--lease-seconds", type=int, default=900, help="Lease duration for claimed queue jobs")
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     args = parser.parse_args()
+
+    if args.enqueue_only and args.drain_only:
+        parser.error("--enqueue-only and --drain-only are mutually exclusive")
+    if args.discover_only and args.drain_only:
+        parser.error("--discover-only cannot be combined with --drain-only")
+    if args.discover_only and args.enqueue_only:
+        parser.error("--discover-only cannot be combined with --enqueue-only")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -574,6 +600,9 @@ def main():
     queue_processed = 0
     queue_failed = 0
     queue_error: str | None = None
+    if (args.enqueue_only or args.drain_only) and not queue_write_enabled:
+        log.error("Queue mode requires QUEUE_WRITE_ENABLED=1")
+        sys.exit(1)
     if queue_write_enabled:
         state.record_queue_run_start(run_id=run_id, role="monolith", args=vars(args))
 
@@ -582,6 +611,129 @@ def main():
             "Run %s: monitoring %d committees, looking back %d day(s), max cost $%.2f",
             run_id, len(active), args.days, max_cost,
         )
+
+        if args.drain_only:
+            worker_id = args.worker_id or f"worker-{os.getpid()}"
+            claimed_jobs = state.claim_hearing_jobs(
+                worker_id=worker_id,
+                limit=max(args.max_tasks, 1),
+                lease_seconds=max(args.lease_seconds, 30),
+            )
+            queue_discovered = len(claimed_jobs)
+            if not claimed_jobs:
+                log.info("Drain mode: no pending hearing jobs to claim.")
+                queue_status = "drain_only_no_jobs"
+                return
+
+            log.info(
+                "Drain mode: claimed %d hearing job(s) as %s",
+                len(claimed_jobs), worker_id,
+            )
+            results: list[dict] = []
+            errors: list[dict] = []
+            total_cost = 0.0
+
+            def _run_claimed_job(job: dict) -> dict:
+                hearing_id = job["hearing_id"]
+                hearing_row = state.get_hearing(hearing_id)
+                if hearing_row is None:
+                    raise ValueError(f"hearing not found in state DB: {hearing_id}")
+                hearing = _hearing_from_state_row(hearing_row)
+                return process_hearing(hearing, state, run_dir)
+
+            if args.workers <= 1:
+                for i, job in enumerate(claimed_jobs, 1):
+                    if total_cost >= max_cost:
+                        log.warning("Cost limit reached ($%.2f >= $%.2f), stopping", total_cost, max_cost)
+                        break
+                    hearing_id = job["hearing_id"]
+                    log.info("--- [%d/%d] Draining hearing job %s ---", i, len(claimed_jobs), hearing_id)
+                    try:
+                        result = _run_claimed_job(job)
+                        results.append(result)
+                        total_cost += result.get("cost", {}).get("total_usd", 0)
+                        state.complete_hearing_job(hearing_id)
+                    except Exception as e:
+                        errors.append({"hearing_id": hearing_id, "error": str(e)})
+                        state.fail_hearing_job(hearing_id, str(e))
+                        log.error("[%d/%d] FAILED drain %s: %s", i, len(claimed_jobs), hearing_id, e, exc_info=True)
+            else:
+                with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                    futures = {pool.submit(_run_claimed_job, job): job for job in claimed_jobs}
+                    completed_count = 0
+                    for future in as_completed(futures):
+                        completed_count += 1
+                        job = futures[future]
+                        hearing_id = job["hearing_id"]
+                        try:
+                            result = future.result()
+                            results.append(result)
+                            total_cost += result.get("cost", {}).get("total_usd", 0)
+                            state.complete_hearing_job(hearing_id)
+                            if total_cost >= max_cost:
+                                log.warning(
+                                    "Cost limit reached ($%.2f >= $%.2f), cancelling remaining",
+                                    total_cost, max_cost,
+                                )
+                                for f in futures:
+                                    f.cancel()
+                                break
+                        except Exception as e:
+                            errors.append({"hearing_id": hearing_id, "error": str(e)})
+                            state.fail_hearing_job(hearing_id, str(e))
+                            log.error(
+                                "[%d/%d] FAILED drain %s: %s",
+                                completed_count, len(claimed_jobs), hearing_id, e, exc_info=True,
+                            )
+
+            if results:
+                _update_index(results)
+
+            total_llm = sum(r.get("cost", {}).get("llm_cleanup_usd", 0) for r in results)
+            total_whisper = sum(r.get("cost", {}).get("whisper_usd", 0) for r in results)
+            total_all = total_llm + total_whisper
+            run_completed = datetime.now(timezone.utc).isoformat()
+            run_meta = {
+                "run_id": run_id,
+                "mode": "drain_only",
+                "worker_id": worker_id,
+                "started_at": run_started,
+                "completed_at": run_completed,
+                "args": vars(args),
+                "hearings_discovered": len(claimed_jobs),
+                "hearings_processed": len(results),
+                "hearings_failed": len(errors),
+                "cost": {
+                    "llm_cleanup_usd": total_llm,
+                    "whisper_usd": total_whisper,
+                    "total_usd": total_all,
+                },
+                "hearings": [
+                    {"id": r["id"], "title": r["title"], "committee_key": r["committee_key"],
+                     "date": r["date"], "cost": r.get("cost", {})}
+                    for r in results
+                ],
+                "errors": errors,
+            }
+            run_meta_path = run_dir / "run_meta.json"
+            tmp = run_meta_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(run_meta, indent=2))
+            os.replace(tmp, run_meta_path)
+
+            state.record_run(
+                run_id=run_id,
+                started_at=run_started,
+                completed_at=run_completed,
+                hearings_processed=len(results),
+                llm_cleanup_usd=total_llm,
+                whisper_usd=total_whisper,
+                total_usd=total_all,
+            )
+
+            queue_processed = len(results)
+            queue_failed = len(errors)
+            queue_status = "drain_only_completed" if not errors else "drain_only_partial"
+            return
 
         # Discover — pass committees dict and state (for C-SPAN rotation tracking)
         hearings = discover_all(days=args.days, committees=active, state=state)
@@ -619,6 +771,28 @@ def main():
         for h in hearings:
             marker = " " if h in new_hearings else "*"
             log.info("  %s [%s] %s: %s", marker, h.date, h.committee_name, h.title[:80])
+
+        if args.enqueue_only:
+            queued = 0
+            for h in new_hearings:
+                state.record_hearing(
+                    h.id, h.committee_key, h.date,
+                    h.title, h.slug, h.sources,
+                )
+                state.mark_step(h.id, "discover", "done")
+                if state.enqueue_hearing_job(
+                    hearing_id=h.id,
+                    run_id=run_id,
+                    committee_key=h.committee_key,
+                    hearing_date=h.date,
+                    title=h.title,
+                ):
+                    queued += 1
+            log.info("Enqueue mode: queued %d hearing job(s)", queued)
+            queue_processed = queued
+            queue_failed = 0
+            queue_status = "enqueue_only_completed"
+            return
 
         if args.discover_only:
             print(json.dumps([{
