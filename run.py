@@ -162,6 +162,12 @@ def _emit_transcript_published_event(hearing: Hearing, state: State, result: dic
     event_id = f"transcript_published:{hearing.id}:v{publish_version}"
     rel_path = f"{hearing.committee_key}/{hearing.date}_{hearing.id}"
     transcript_path = config.TRANSCRIPTS_DIR / rel_path / "transcript.txt"
+    if not transcript_path.exists() or transcript_path.stat().st_size == 0:
+        log.info(
+            "Skipping outbox publish event for %s: no canonical transcript artifact",
+            hearing.id,
+        )
+        return
     payload = {
         "event_id": event_id,
         "event_type": "transcript_published",

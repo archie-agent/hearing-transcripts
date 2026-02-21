@@ -92,7 +92,11 @@ class TestEmitTranscriptPublishedEvent:
         state = MagicMock()
         result = {"cost": {"total_usd": 0.12}}
         monkeypatch.setattr("run.config.QUEUE_WRITE_ENABLED", True)
-        monkeypatch.setattr("run.config.TRANSCRIPTS_DIR", tmp_path / "transcripts")
+        transcripts_dir = tmp_path / "transcripts"
+        monkeypatch.setattr("run.config.TRANSCRIPTS_DIR", transcripts_dir)
+        transcript_path = transcripts_dir / hearing.committee_key / f"{hearing.date}_{hearing.id}" / "transcript.txt"
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        transcript_path.write_text("Transcript body", encoding="utf-8")
 
         _emit_transcript_published_event(hearing, state, result)
 
@@ -112,6 +116,23 @@ class TestEmitTranscriptPublishedEvent:
         monkeypatch.setattr("run.config.QUEUE_WRITE_ENABLED", False)
 
         _emit_transcript_published_event(hearing, state, {"cost": {}})
+
+        state.enqueue_outbox_event.assert_not_called()
+
+    def test_noop_when_transcript_artifact_missing(self, monkeypatch, tmp_path):
+        from run import _emit_transcript_published_event
+
+        hearing = _make_hearing(
+            committee_key="house.judiciary",
+            committee_name="House Judiciary",
+            date="2026-02-10",
+            sources={"youtube_url": "https://youtube.com/watch?v=abc123"},
+        )
+        state = MagicMock()
+        monkeypatch.setattr("run.config.QUEUE_WRITE_ENABLED", True)
+        monkeypatch.setattr("run.config.TRANSCRIPTS_DIR", tmp_path / "transcripts")
+
+        _emit_transcript_published_event(hearing, state, {"cost": {"total_usd": 0.05}})
 
         state.enqueue_outbox_event.assert_not_called()
 

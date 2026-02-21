@@ -30,6 +30,8 @@ log = logging.getLogger(__name__)
 
 # Thread-safe rate limiter shared across all discovery HTTP calls
 _rate_limiter = RateLimiter(min_delay=1.5)
+# API endpoints tolerate a higher request rate than committee websites.
+_api_rate_limiter = RateLimiter(min_delay=0.1)
 
 # Serialize yt-dlp calls across threads.  YouTube silently returns empty
 # results when hit with many concurrent requests — a single lock ensures
@@ -80,7 +82,11 @@ class Hearing:
 def _http_get(url: str, timeout: float = 20.0,
               client: httpx.Client | None = None) -> httpx.Response | None:
     """Fetch a URL with retries, rate limiting, and 429 backoff. Returns None on failure."""
-    _rate_limiter.wait(urlparse(url).netloc)
+    domain = urlparse(url).netloc
+    if domain in ("api.congress.gov", "api.govinfo.gov"):
+        _api_rate_limiter.wait(domain)
+    else:
+        _rate_limiter.wait(domain)
 
     def _do_get(c: httpx.Client) -> httpx.Response | None:
         resp = c.get(url)
@@ -693,7 +699,10 @@ def _fetch_govinfo_committee(package_id: str) -> str | None:
     return None
 
 
-def discover_congress_api(days: int = 7) -> list[Hearing]:
+def discover_congress_api(
+    days: int = 7,
+    committees: dict[str, dict] | None = None,
+) -> list[Hearing]:
     """Poll congress.gov committee-meeting API for recent hearings.
 
     Uses the structured congress.gov API to discover hearings with witness
@@ -712,11 +721,26 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
     from_dt = cutoff.strftime("%Y-%m-%dT00:00:00Z")
 
     hearings: list[Hearing] = []
+    allowed_committee_keys: set[str] | None = set(committees.keys()) if committees is not None else None
+    if committees is None:
+        chambers = ("house", "senate")
+    else:
+        chamber_set = {
+            meta.get("chamber")
+            for meta in committees.values()
+            if meta.get("chamber") in ("house", "senate")
+        }
+        if not chamber_set:
+            chambers = ("house", "senate")
+        else:
+            chambers = tuple(c for c in ("house", "senate") if c in chamber_set)
+            if not chambers:
+                chambers = ("house", "senate")
 
     # Phase 1: Collect all meeting URLs from listing endpoints
     pending_details: list[tuple[str, str]] = []  # (event_id, detail_url)
 
-    for chamber in ("house", "senate"):
+    for chamber in chambers:
         offset = 0
         while True:
             list_url = (
@@ -825,6 +849,8 @@ def discover_congress_api(days: int = 7) -> list[Hearing]:
         if not committee_key:
             log.debug("  No matching committee for meeting %s: %s",
                       event_id, title[:60])
+            return None
+        if allowed_committee_keys is not None and committee_key not in allowed_committee_keys:
             return None
 
         committee_meta = config.get_all_committees().get(committee_key, {})
@@ -1052,7 +1078,7 @@ def discover_all(days: int = 1, committees: dict[str, dict] | None = None,
 
     # Congress.gov API (structured data with witnesses)
     try:
-        congress_api = discover_congress_api(days=max(days, 7))
+        congress_api = discover_congress_api(days=max(days, 7), committees=committees)
         if congress_api:
             log.info("congress.gov API: %d hearings", len(congress_api))
             all_hearings.extend(congress_api)
