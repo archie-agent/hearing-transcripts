@@ -561,6 +561,175 @@ class State:
         """, (hearing_id, stage, publish_version)).fetchone()
         return dict(row) if row else None
 
+    def enqueue_stage_task(
+        self,
+        hearing_id: str,
+        stage: str,
+        publish_version: int = 1,
+        payload: dict | None = None,
+    ) -> bool:
+        """Insert a pending stage task if missing; return True if inserted."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        payload_json = json.dumps(payload) if payload is not None else None
+        cursor = conn.execute("""
+            INSERT OR IGNORE INTO stage_tasks
+                (hearing_id, stage, publish_version, status, attempt_count,
+                 max_attempts, available_at, enqueued_at, payload_json)
+            VALUES (?, ?, ?, 'pending', 0, 5, ?, ?, ?)
+        """, (hearing_id, stage, publish_version, now, now, payload_json))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def reclaim_expired_stage_task_leases(self) -> int:
+        """Move expired running stage tasks back to pending."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute("""
+            UPDATE stage_tasks
+            SET status = 'pending',
+                claimed_by = NULL,
+                lease_expires_at = NULL,
+                available_at = ?,
+                last_error = COALESCE(last_error, 'lease expired')
+            WHERE status = 'running'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < ?
+        """, (now, now))
+        conn.commit()
+        return cursor.rowcount
+
+    def claim_stage_tasks(
+        self,
+        worker_id: str,
+        limit: int = 20,
+        lease_seconds: int = 900,
+    ) -> list[dict]:
+        """Claim pending stage tasks for worker execution."""
+        conn = self._get_conn()
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_until = (now_dt + timedelta(seconds=max(lease_seconds, 1))).isoformat()
+
+        self.reclaim_expired_stage_task_leases()
+
+        cursor = conn.execute("""
+            SELECT task_id
+            FROM stage_tasks
+            WHERE status = 'pending'
+              AND (available_at IS NULL OR available_at <= ?)
+            ORDER BY available_at ASC, hearing_id ASC, task_id ASC
+            LIMIT ?
+        """, (now, limit))
+        task_ids = [row["task_id"] for row in cursor.fetchall()]
+        if not task_ids:
+            return []
+
+        claimed: list[dict] = []
+        for task_id in task_ids:
+            update = conn.execute("""
+                UPDATE stage_tasks
+                SET status = 'running',
+                    claimed_by = ?,
+                    lease_expires_at = ?,
+                    started_at = COALESCE(started_at, ?),
+                    attempt_count = attempt_count + 1
+                WHERE task_id = ?
+                  AND status = 'pending'
+                  AND (available_at IS NULL OR available_at <= ?)
+            """, (worker_id, lease_until, now, task_id, now))
+            if update.rowcount == 0:
+                continue
+            row = conn.execute("""
+                SELECT task_id, hearing_id, stage, publish_version, status,
+                       attempt_count, max_attempts, claimed_by, lease_expires_at,
+                       payload_json, last_error
+                FROM stage_tasks
+                WHERE task_id = ?
+            """, (task_id,)).fetchone()
+            if row:
+                rec = dict(row)
+                payload_json = rec.get("payload_json")
+                rec["payload"] = json.loads(payload_json) if payload_json else {}
+                claimed.append(rec)
+
+        conn.commit()
+        return claimed
+
+    def complete_stage_task(self, hearing_id: str, stage: str, publish_version: int = 1) -> None:
+        """Mark stage task done and release lease metadata."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("""
+            UPDATE stage_tasks
+            SET status = 'done',
+                completed_at = COALESCE(completed_at, ?),
+                claimed_by = NULL,
+                lease_expires_at = NULL,
+                last_error = NULL
+            WHERE hearing_id = ? AND stage = ? AND publish_version = ?
+        """, (now, hearing_id, stage, publish_version))
+        conn.commit()
+
+    def fail_stage_task(
+        self,
+        hearing_id: str,
+        stage: str,
+        error: str,
+        publish_version: int = 1,
+        base_delay_seconds: int = 60,
+    ) -> None:
+        """Mark stage task failed and schedule retry or DLQ."""
+        conn = self._get_conn()
+        row = conn.execute("""
+            SELECT attempt_count, max_attempts
+            FROM stage_tasks
+            WHERE hearing_id = ? AND stage = ? AND publish_version = ?
+        """, (hearing_id, stage, publish_version)).fetchone()
+        if row is None:
+            return
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        attempt_count = int(row["attempt_count"] or 0)
+        max_attempts = int(row["max_attempts"] or 5)
+        if attempt_count >= max_attempts:
+            conn.execute("""
+                UPDATE stage_tasks
+                SET status = 'dead_letter',
+                    completed_at = ?,
+                    claimed_by = NULL,
+                    lease_expires_at = NULL,
+                    last_error = ?
+                WHERE hearing_id = ? AND stage = ? AND publish_version = ?
+            """, (now, error, hearing_id, stage, publish_version))
+            self._upsert_dead_letter_item(
+                conn=conn,
+                item_type="stage_task",
+                item_key=f"{hearing_id}:{stage}:v{publish_version}",
+                stage=stage,
+                error=error,
+                attempt_count=attempt_count,
+                payload={
+                    "hearing_id": hearing_id,
+                    "stage": stage,
+                    "publish_version": publish_version,
+                },
+            )
+        else:
+            delay_seconds = base_delay_seconds * (2 ** max(attempt_count - 1, 0))
+            delay_seconds = min(delay_seconds, 3600)
+            available_at = (now_dt + timedelta(seconds=delay_seconds)).isoformat()
+            conn.execute("""
+                UPDATE stage_tasks
+                SET status = 'pending',
+                    available_at = ?,
+                    claimed_by = NULL,
+                    lease_expires_at = NULL,
+                    last_error = ?
+                WHERE hearing_id = ? AND stage = ? AND publish_version = ?
+            """, (available_at, error, hearing_id, stage, publish_version))
+        conn.commit()
+
     def record_scraper_run(self, committee_key: str, source_type: str,
                           count: int, error: str | None = None) -> None:
         """Log a scraper run result for health monitoring."""
@@ -703,6 +872,92 @@ class State:
         """, (job_id, run_id, json.dumps(payload or {}), now, now, now))
         conn.commit()
 
+    def enqueue_discovery_job(self, job_id: str, run_id: str, payload: dict | None = None) -> bool:
+        """Enqueue a discovery job for producer workers. Returns True if inserted."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute("""
+            INSERT OR IGNORE INTO discovery_jobs
+                (job_id, run_id, status, payload_json, attempt_count, max_attempts,
+                 available_at, enqueued_at)
+            VALUES (?, ?, 'pending', ?, 0, 5, ?, ?)
+        """, (job_id, run_id, json.dumps(payload or {}), now, now))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def reclaim_expired_discovery_job_leases(self) -> int:
+        """Move expired running discovery jobs back to pending."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute("""
+            UPDATE discovery_jobs
+            SET status = 'pending',
+                claimed_by = NULL,
+                lease_expires_at = NULL,
+                available_at = ?,
+                last_error = COALESCE(last_error, 'lease expired')
+            WHERE status = 'running'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < ?
+        """, (now, now))
+        conn.commit()
+        return cursor.rowcount
+
+    def claim_discovery_jobs(
+        self,
+        worker_id: str,
+        limit: int = 1,
+        lease_seconds: int = 900,
+    ) -> list[dict]:
+        """Claim pending discovery jobs for a producer worker."""
+        conn = self._get_conn()
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_until = (now_dt + timedelta(seconds=max(lease_seconds, 1))).isoformat()
+
+        self.reclaim_expired_discovery_job_leases()
+
+        cursor = conn.execute("""
+            SELECT job_id
+            FROM discovery_jobs
+            WHERE status = 'pending'
+              AND (available_at IS NULL OR available_at <= ?)
+            ORDER BY available_at ASC, enqueued_at ASC
+            LIMIT ?
+        """, (now, limit))
+        job_ids = [row["job_id"] for row in cursor.fetchall()]
+        if not job_ids:
+            return []
+
+        claimed: list[dict] = []
+        for job_id in job_ids:
+            update = conn.execute("""
+                UPDATE discovery_jobs
+                SET status = 'running',
+                    claimed_by = ?,
+                    lease_expires_at = ?,
+                    started_at = COALESCE(started_at, ?),
+                    attempt_count = attempt_count + 1
+                WHERE job_id = ?
+                  AND status = 'pending'
+                  AND (available_at IS NULL OR available_at <= ?)
+            """, (worker_id, lease_until, now, job_id, now))
+            if update.rowcount == 0:
+                continue
+            row = conn.execute("""
+                SELECT job_id, run_id, status, payload_json, attempt_count, max_attempts,
+                       claimed_by, lease_expires_at
+                FROM discovery_jobs
+                WHERE job_id = ?
+            """, (job_id,)).fetchone()
+            if row:
+                rec = dict(row)
+                payload_json = rec.get("payload_json")
+                rec["payload"] = json.loads(payload_json) if payload_json else {}
+                claimed.append(rec)
+        conn.commit()
+        return claimed
+
     def finish_discovery_job(self, job_id: str, status: str, error: str | None = None) -> None:
         """Finalize a discovery producer job."""
         conn = self._get_conn()
@@ -714,6 +969,53 @@ class State:
                 last_error = ?
             WHERE job_id = ?
         """, (status, now, error, job_id))
+        conn.commit()
+
+    def fail_discovery_job(self, job_id: str, error: str, base_delay_seconds: int = 90) -> None:
+        """Record discovery job failure and either retry or DLQ."""
+        conn = self._get_conn()
+        row = conn.execute("""
+            SELECT attempt_count, max_attempts
+            FROM discovery_jobs
+            WHERE job_id = ?
+        """, (job_id,)).fetchone()
+        if row is None:
+            return
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        attempt_count = int(row["attempt_count"] or 0)
+        max_attempts = int(row["max_attempts"] or 5)
+        if attempt_count >= max_attempts:
+            conn.execute("""
+                UPDATE discovery_jobs
+                SET status = 'failed',
+                    completed_at = ?,
+                    claimed_by = NULL,
+                    lease_expires_at = NULL,
+                    last_error = ?
+                WHERE job_id = ?
+            """, (now, error, job_id))
+            self._upsert_dead_letter_item(
+                conn=conn,
+                item_type="discovery_job",
+                item_key=job_id,
+                stage=None,
+                error=error,
+                attempt_count=attempt_count,
+            )
+        else:
+            delay_seconds = base_delay_seconds * (2 ** max(attempt_count - 1, 0))
+            delay_seconds = min(delay_seconds, 3600)
+            available_at = (now_dt + timedelta(seconds=delay_seconds)).isoformat()
+            conn.execute("""
+                UPDATE discovery_jobs
+                SET status = 'pending',
+                    available_at = ?,
+                    claimed_by = NULL,
+                    lease_expires_at = NULL,
+                    last_error = ?
+                WHERE job_id = ?
+            """, (available_at, error, job_id))
         conn.commit()
 
     def record_queue_run_finish(

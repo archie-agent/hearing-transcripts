@@ -126,6 +126,11 @@ def _mark_stage_task(
     """Dual-write stage status into queue scaffolding tables."""
     if not config.QUEUE_WRITE_ENABLED:
         return
+    if status == "running":
+        existing = state.get_stage_task(hearing_id, stage, publish_version=1)
+        if existing and existing.get("status") == "running" and existing.get("claimed_by"):
+            # Claimed stage workers already increment attempt_count on claim.
+            return
     state.mark_stage_task(
         hearing_id=hearing_id,
         stage=stage,
@@ -179,6 +184,184 @@ def _emit_transcript_published_event(hearing: Hearing, state: State, result: dic
         payload=payload,
         publish_version=publish_version,
     )
+
+
+STAGE_SEQUENCE = ["captions", "isvp", "cspan", "testimony", "govinfo", "publish"]
+
+
+def _next_stage(stage: str) -> str | None:
+    """Return the next stage in pipeline order, if any."""
+    try:
+        idx = STAGE_SEQUENCE.index(stage)
+    except ValueError:
+        return None
+    if idx + 1 >= len(STAGE_SEQUENCE):
+        return None
+    return STAGE_SEQUENCE[idx + 1]
+
+
+def _schedule_stage_task(
+    state: State,
+    hearing_id: str,
+    stage: str,
+    publish_version: int = 1,
+    payload: dict | None = None,
+) -> bool:
+    """Ensure a stage task is pending unless already running/pending/dead-letter."""
+    inserted = state.enqueue_stage_task(
+        hearing_id=hearing_id,
+        stage=stage,
+        publish_version=publish_version,
+        payload=payload,
+    )
+    if inserted:
+        return True
+
+    row = state.get_stage_task(hearing_id, stage, publish_version=publish_version)
+    if row is None:
+        return False
+
+    status = row.get("status")
+    if status in ("pending", "running", "dead_letter"):
+        return False
+
+    state.mark_stage_task(
+        hearing_id=hearing_id,
+        stage=stage,
+        status="pending",
+        publish_version=publish_version,
+        payload=payload,
+    )
+    return True
+
+
+def _initial_stage_for_hearing(hearing: Hearing, state: State) -> str | None:
+    """Choose the first stage to enqueue for this hearing."""
+    hearing_id = hearing.id
+    if not state.is_step_done(hearing_id, "captions"):
+        return "captions"
+    if (
+        hearing.sources.get("isvp_comm")
+        and hearing.sources.get("isvp_filename")
+        and not state.is_step_done(hearing_id, "isvp_fetched")
+    ):
+        return "isvp"
+    if not state.is_step_done(hearing_id, "isvp"):
+        return "isvp"
+    if hearing.sources.get("cspan_url") and not state.is_step_done(hearing_id, "cspan_fetched"):
+        return "cspan"
+    if not state.is_step_done(hearing_id, "cspan"):
+        return "cspan"
+    if not state.is_step_done(hearing_id, "testimony"):
+        return "testimony"
+    if not state.is_step_done(hearing_id, "govinfo"):
+        return "govinfo"
+    if not state.is_processed(hearing_id):
+        return "publish"
+    return None
+
+
+def _hydrate_outputs_from_artifacts(hearing_dir: Path) -> dict:
+    """Build output-path map from existing run artifacts."""
+    outputs: dict = {}
+    audio: dict = {}
+
+    captions = hearing_dir / "captions.txt"
+    cleaned = hearing_dir / "transcript_cleaned.txt"
+    if captions.exists():
+        audio["captions"] = str(captions)
+    if cleaned.exists():
+        audio["cleaned_transcript"] = str(cleaned)
+    if audio:
+        outputs["audio"] = audio
+
+    for key, fname in (
+        ("isvp_transcript", "isvp_transcript.txt"),
+        ("isvp_cleaned", "isvp_cleaned.txt"),
+        ("cspan_transcript", "cspan_transcript.txt"),
+        ("cspan_cleaned", "cspan_cleaned.txt"),
+        ("govinfo_transcript", "govinfo_transcript.txt"),
+    ):
+        p = hearing_dir / fname
+        if p.exists():
+            outputs[key] = str(p)
+
+    testimony_dir = hearing_dir / "testimony"
+    if testimony_dir.is_dir():
+        files = sorted(str(p) for p in testimony_dir.glob("*.txt"))
+        if files:
+            outputs["testimony"] = files
+
+    return outputs
+
+
+def _run_stage_task(hearing: Hearing, stage: str, state: State, run_dir: Path) -> dict:
+    """Execute a single stage task for one hearing."""
+    if stage not in STAGE_SEQUENCE:
+        raise ValueError(f"unknown stage: {stage}")
+
+    hearing_dir = run_dir / "hearings" / hearing.id
+    hearing_dir.mkdir(parents=True, exist_ok=True)
+    state.record_hearing(
+        hearing.id, hearing.committee_key, hearing.date,
+        hearing.title, hearing.slug, hearing.sources,
+    )
+    state.mark_step(hearing.id, "discover", "done")
+
+    cost = {"llm_cleanup_usd": 0.0, "whisper_usd": 0.0, "total_usd": 0.0}
+    result = {
+        "id": hearing.id,
+        "committee": hearing.committee_name,
+        "committee_key": hearing.committee_key,
+        "date": hearing.date,
+        "title": hearing.title,
+        "slug": hearing.slug,
+        "sources": hearing.sources,
+        "outputs": _hydrate_outputs_from_artifacts(hearing_dir),
+        "cost": cost,
+    }
+
+    if stage == "captions":
+        _step_youtube_captions(hearing, state, hearing_dir, result, cost)
+    elif stage == "isvp":
+        if not (hearing.sources.get("isvp_comm") and hearing.sources.get("isvp_filename")):
+            state.mark_step(hearing.id, "isvp", "done")
+            _mark_stage_task(state, hearing.id, "isvp", "done")
+        else:
+            _step_isvp_captions(hearing, state, hearing_dir, result, cost)
+    elif stage == "cspan":
+        if not hearing.sources.get("cspan_url"):
+            state.mark_step(hearing.id, "cspan", "done")
+            _mark_stage_task(state, hearing.id, "cspan", "done")
+        else:
+            _step_cspan_captions(hearing, state, hearing_dir, result, cost)
+    elif stage == "testimony":
+        _step_testimony_pdfs(hearing, state, hearing_dir, result, cost)
+    elif stage == "govinfo":
+        _step_govinfo_transcript(hearing, state, hearing_dir, result, cost)
+    elif stage == "publish":
+        _mark_stage_task(state, hearing.id, "publish", "running")
+        _publish_to_transcripts(hearing, hearing_dir, result)
+        _emit_transcript_published_event(hearing, state, result)
+        _mark_stage_task(state, hearing.id, "publish", "done")
+        state.mark_processed(hearing.id)
+
+    cost["total_usd"] = cost["llm_cleanup_usd"] + cost["whisper_usd"]
+    stage_row = state.get_stage_task(hearing.id, stage, publish_version=1)
+    if stage_row is None:
+        raise ValueError(f"missing stage task row after execution: {hearing.id}:{stage}")
+    status = stage_row.get("status")
+    if status in ("failed", "dead_letter"):
+        raise ValueError(stage_row.get("last_error") or f"stage failed: {stage}")
+
+    meta = result.copy()
+    meta["processed_at"] = datetime.now(timezone.utc).isoformat()
+    meta_path = hearing_dir / "meta.json"
+    tmp = meta_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(meta, indent=2))
+    os.replace(tmp, meta_path)
+
+    return result
 
 
 def _step_youtube_captions(hearing: Hearing, state: State, hearing_dir: Path,
@@ -586,11 +769,11 @@ def main():
     parser.add_argument("--max-cost", type=float, default=None, help="Max LLM cost per run in USD")
     parser.add_argument("--workers", type=int, default=3, help="Parallel hearing processing workers")
     parser.add_argument("--reprocess", action="store_true", help="Re-process already processed hearings")
-    parser.add_argument("--enqueue-only", action="store_true", help="Discover hearings and enqueue queue jobs only")
-    parser.add_argument("--drain-only", action="store_true", help="Drain queued hearing jobs without running discovery")
+    parser.add_argument("--enqueue-only", action="store_true", help="Discover hearings and enqueue initial stage tasks only")
+    parser.add_argument("--drain-only", action="store_true", help="Drain queued stage tasks without running discovery")
     parser.add_argument("--worker-id", type=str, default=None, help="Worker identity when using --drain-only")
-    parser.add_argument("--max-tasks", type=int, default=20, help="Max queued hearing jobs to claim in one drain run")
-    parser.add_argument("--lease-seconds", type=int, default=900, help="Lease duration for claimed queue jobs")
+    parser.add_argument("--max-tasks", type=int, default=20, help="Max queued stage tasks to claim in one drain run")
+    parser.add_argument("--lease-seconds", type=int, default=900, help="Lease duration for claimed stage tasks")
     parser.add_argument("--queue-health", action="store_true", help="Print queue/dead-letter health metrics and exit")
     parser.add_argument("--requeue-hearing-job", type=str, default=None, help="Move failed hearing job back to pending by hearing ID")
     parser.add_argument("--requeue-outbox-event", type=str, default=None, help="Move dead-letter outbox event back to pending by event ID")
@@ -755,62 +938,99 @@ def main():
 
         if args.drain_only:
             worker_id = args.worker_id or f"worker-{os.getpid()}"
-            claimed_jobs = state.claim_hearing_jobs(
+            claimed_tasks = state.claim_stage_tasks(
                 worker_id=worker_id,
                 limit=max(args.max_tasks, 1),
                 lease_seconds=max(args.lease_seconds, 30),
             )
-            queue_discovered = len(claimed_jobs)
-            if not claimed_jobs:
-                log.info("Drain mode: no pending hearing jobs to claim.")
+            queue_discovered = len(claimed_tasks)
+            if not claimed_tasks:
+                log.info("Drain mode: no pending stage tasks to claim.")
                 queue_status = "drain_only_no_jobs"
                 return
 
             log.info(
-                "Drain mode: claimed %d hearing job(s) as %s",
-                len(claimed_jobs), worker_id,
+                "Drain mode: claimed %d stage task(s) as %s",
+                len(claimed_tasks), worker_id,
             )
             results: list[dict] = []
+            published_results: list[dict] = []
             errors: list[dict] = []
             total_cost = 0.0
 
-            def _run_claimed_job(job: dict) -> dict:
-                hearing_id = job["hearing_id"]
+            def _run_claimed_task(task: dict) -> dict:
+                hearing_id = task["hearing_id"]
+                stage = task["stage"]
+                publish_version = int(task.get("publish_version") or 1)
                 hearing_row = state.get_hearing(hearing_id)
                 if hearing_row is None:
                     raise ValueError(f"hearing not found in state DB: {hearing_id}")
                 hearing = _hearing_from_state_row(hearing_row)
-                return process_hearing(hearing, state, run_dir)
+                result = _run_stage_task(hearing, stage, state, run_dir)
+                return {
+                    "hearing_id": hearing_id,
+                    "stage": stage,
+                    "publish_version": publish_version,
+                    "result": result,
+                }
 
             if args.workers <= 1:
-                for i, job in enumerate(claimed_jobs, 1):
+                for i, task in enumerate(claimed_tasks, 1):
                     if total_cost >= max_cost:
                         log.warning("Cost limit reached ($%.2f >= $%.2f), stopping", total_cost, max_cost)
                         break
-                    hearing_id = job["hearing_id"]
-                    log.info("--- [%d/%d] Draining hearing job %s ---", i, len(claimed_jobs), hearing_id)
+                    hearing_id = task["hearing_id"]
+                    stage = task["stage"]
+                    publish_version = int(task.get("publish_version") or 1)
+                    task_key = f"{hearing_id}:{stage}:v{publish_version}"
+                    log.info("--- [%d/%d] Draining stage task %s ---", i, len(claimed_tasks), task_key)
                     try:
-                        result = _run_claimed_job(job)
-                        results.append(result)
+                        outcome = _run_claimed_task(task)
+                        result = outcome["result"]
+                        state.complete_stage_task(hearing_id, stage, publish_version=publish_version)
+                        next_stage = _next_stage(stage)
+                        if next_stage:
+                            _schedule_stage_task(
+                                state=state,
+                                hearing_id=hearing_id,
+                                stage=next_stage,
+                                publish_version=publish_version,
+                            )
+                        if stage == "publish":
+                            published_results.append(result)
+                        results.append(outcome)
                         total_cost += result.get("cost", {}).get("total_usd", 0)
-                        state.complete_hearing_job(hearing_id)
                     except Exception as e:
-                        errors.append({"hearing_id": hearing_id, "error": str(e)})
-                        state.fail_hearing_job(hearing_id, str(e))
-                        log.error("[%d/%d] FAILED drain %s: %s", i, len(claimed_jobs), hearing_id, e, exc_info=True)
+                        errors.append({"task": task_key, "error": str(e)})
+                        state.fail_stage_task(hearing_id, stage, str(e), publish_version=publish_version)
+                        log.error("[%d/%d] FAILED drain %s: %s", i, len(claimed_tasks), task_key, e, exc_info=True)
             else:
                 with ThreadPoolExecutor(max_workers=args.workers) as pool:
-                    futures = {pool.submit(_run_claimed_job, job): job for job in claimed_jobs}
+                    futures = {pool.submit(_run_claimed_task, task): task for task in claimed_tasks}
                     completed_count = 0
                     for future in as_completed(futures):
                         completed_count += 1
-                        job = futures[future]
-                        hearing_id = job["hearing_id"]
+                        task = futures[future]
+                        hearing_id = task["hearing_id"]
+                        stage = task["stage"]
+                        publish_version = int(task.get("publish_version") or 1)
+                        task_key = f"{hearing_id}:{stage}:v{publish_version}"
                         try:
-                            result = future.result()
-                            results.append(result)
+                            outcome = future.result()
+                            result = outcome["result"]
+                            state.complete_stage_task(hearing_id, stage, publish_version=publish_version)
+                            next_stage = _next_stage(stage)
+                            if next_stage:
+                                _schedule_stage_task(
+                                    state=state,
+                                    hearing_id=hearing_id,
+                                    stage=next_stage,
+                                    publish_version=publish_version,
+                                )
+                            if stage == "publish":
+                                published_results.append(result)
+                            results.append(outcome)
                             total_cost += result.get("cost", {}).get("total_usd", 0)
-                            state.complete_hearing_job(hearing_id)
                             if total_cost >= max_cost:
                                 log.warning(
                                     "Cost limit reached ($%.2f >= $%.2f), cancelling remaining",
@@ -820,19 +1040,20 @@ def main():
                                     f.cancel()
                                 break
                         except Exception as e:
-                            errors.append({"hearing_id": hearing_id, "error": str(e)})
-                            state.fail_hearing_job(hearing_id, str(e))
+                            errors.append({"task": task_key, "error": str(e)})
+                            state.fail_stage_task(hearing_id, stage, str(e), publish_version=publish_version)
                             log.error(
                                 "[%d/%d] FAILED drain %s: %s",
-                                completed_count, len(claimed_jobs), hearing_id, e, exc_info=True,
+                                completed_count, len(claimed_tasks), task_key, e, exc_info=True,
                             )
 
-            if results:
-                _update_index(results)
+            if published_results:
+                _update_index(published_results)
 
-            total_llm = sum(r.get("cost", {}).get("llm_cleanup_usd", 0) for r in results)
-            total_whisper = sum(r.get("cost", {}).get("whisper_usd", 0) for r in results)
+            total_llm = sum(r["result"].get("cost", {}).get("llm_cleanup_usd", 0) for r in results)
+            total_whisper = sum(r["result"].get("cost", {}).get("whisper_usd", 0) for r in results)
             total_all = total_llm + total_whisper
+            hearings_completed = sum(1 for r in results if r["stage"] == "publish")
             run_completed = datetime.now(timezone.utc).isoformat()
             run_meta = {
                 "run_id": run_id,
@@ -841,17 +1062,26 @@ def main():
                 "started_at": run_started,
                 "completed_at": run_completed,
                 "args": vars(args),
-                "hearings_discovered": len(claimed_jobs),
-                "hearings_processed": len(results),
+                "tasks_claimed": len(claimed_tasks),
+                "tasks_processed": len(results),
+                "tasks_failed": len(errors),
+                "hearings_processed": hearings_completed,
                 "hearings_failed": len(errors),
                 "cost": {
                     "llm_cleanup_usd": total_llm,
                     "whisper_usd": total_whisper,
                     "total_usd": total_all,
                 },
-                "hearings": [
-                    {"id": r["id"], "title": r["title"], "committee_key": r["committee_key"],
-                     "date": r["date"], "cost": r.get("cost", {})}
+                "tasks": [
+                    {
+                        "hearing_id": r["hearing_id"],
+                        "stage": r["stage"],
+                        "publish_version": r["publish_version"],
+                        "title": r["result"]["title"],
+                        "committee_key": r["result"]["committee_key"],
+                        "date": r["result"]["date"],
+                        "cost": r["result"].get("cost", {}),
+                    }
                     for r in results
                 ],
                 "errors": errors,
@@ -865,7 +1095,7 @@ def main():
                 run_id=run_id,
                 started_at=run_started,
                 completed_at=run_completed,
-                hearings_processed=len(results),
+                hearings_processed=hearings_completed,
                 llm_cleanup_usd=total_llm,
                 whisper_usd=total_whisper,
                 total_usd=total_all,
@@ -924,15 +1154,16 @@ def main():
                     h.title, h.slug, h.sources,
                 )
                 state.mark_step(h.id, "discover", "done")
-                if state.enqueue_hearing_job(
+                initial_stage = _initial_stage_for_hearing(h, state)
+                if initial_stage and _schedule_stage_task(
+                    state=state,
                     hearing_id=h.id,
-                    run_id=run_id,
-                    committee_key=h.committee_key,
-                    hearing_date=h.date,
-                    title=h.title,
+                    stage=initial_stage,
+                    publish_version=1,
+                    payload={"run_id": run_id, "queued_by": "enqueue_only"},
                 ):
                     queued += 1
-            log.info("Enqueue mode: queued %d hearing job(s)", queued)
+            log.info("Enqueue mode: queued %d stage task(s)", queued)
             if discovery_job_id and not discovery_job_finished:
                 state.finish_discovery_job(discovery_job_id, status="done")
                 discovery_job_finished = True
