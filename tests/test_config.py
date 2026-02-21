@@ -258,6 +258,11 @@ class TestDefaults:
     def test_congress_is_reasonable(self):
         assert 119 <= config.CONGRESS <= 125
 
+    def test_queue_flags_defaults(self):
+        assert config.QUEUE_WRITE_ENABLED is True
+        assert config.QUEUE_READ_ENABLED is False
+        assert config.OUTBOX_DIGEST_ENABLED is False
+
     def test_cleanup_model_default(self):
         # CLEANUP_MODEL has a non-empty default unless overridden
         assert isinstance(config.CLEANUP_MODEL, str)

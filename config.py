@@ -25,6 +25,15 @@ DATA_DIR = ROOT / "data"
 COMMITTEES_JSON = DATA_DIR / "committees.json"
 
 # ---------------------------------------------------------------------------
+# Queue / outbox feature flags (north-star rollout)
+# ---------------------------------------------------------------------------
+# Queue scaffolding can be written while monolith orchestration remains active.
+# Keep reads off by default until producer/worker cutover.
+QUEUE_WRITE_ENABLED = os.environ.get("QUEUE_WRITE_ENABLED", "1") not in ("0", "false", "False")
+QUEUE_READ_ENABLED = os.environ.get("QUEUE_READ_ENABLED", "0") in ("1", "true", "True")
+OUTBOX_DIGEST_ENABLED = os.environ.get("OUTBOX_DIGEST_ENABLED", "0") in ("1", "true", "True")
+
+# ---------------------------------------------------------------------------
 # API keys — read from environment each call so tests / late-set vars work
 # ---------------------------------------------------------------------------
 
