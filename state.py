@@ -838,6 +838,21 @@ class State:
                     last_error = ?
                 WHERE hearing_id = ?
             """, (now, error, hearing_id))
+            payload_row = conn.execute("""
+                SELECT run_id, committee_key, hearing_date, title
+                FROM hearing_jobs
+                WHERE hearing_id = ?
+            """, (hearing_id,)).fetchone()
+            payload = dict(payload_row) if payload_row else None
+            self._upsert_dead_letter_item(
+                conn=conn,
+                item_type="hearing_job",
+                item_key=hearing_id,
+                stage=None,
+                error=error,
+                attempt_count=attempt_count,
+                payload=payload,
+            )
         else:
             delay_seconds = base_delay_seconds * (2 ** max(attempt_count - 1, 0))
             delay_seconds = min(delay_seconds, 3600)
@@ -1008,11 +1023,26 @@ class State:
             conn.execute("""
                 UPDATE delivery_outbox_items
                 SET status = 'dead_letter',
-                    claimed_by = NULL,
-                    lease_expires_at = NULL,
-                    last_error = ?
-                WHERE event_id = ?
+                claimed_by = NULL,
+                lease_expires_at = NULL,
+                last_error = ?
+            WHERE event_id = ?
             """, (error, event_id))
+            payload_row = conn.execute("""
+                SELECT event_type, hearing_id, payload_json
+                FROM delivery_outbox_items
+                WHERE event_id = ?
+            """, (event_id,)).fetchone()
+            payload = dict(payload_row) if payload_row else None
+            self._upsert_dead_letter_item(
+                conn=conn,
+                item_type="outbox_event",
+                item_key=event_id,
+                stage=None,
+                error=error,
+                attempt_count=attempt_count,
+                payload=payload,
+            )
         else:
             delay_seconds = base_delay_seconds * (2 ** max(attempt_count - 1, 0))
             delay_seconds = min(delay_seconds, 3600)
@@ -1022,11 +1052,193 @@ class State:
                 SET status = 'pending',
                     available_at = ?,
                     claimed_by = NULL,
-                    lease_expires_at = NULL,
-                    last_error = ?
-                WHERE event_id = ?
+                lease_expires_at = NULL,
+                last_error = ?
+            WHERE event_id = ?
             """, (available_at, error, event_id))
         conn.commit()
+
+    def requeue_failed_hearing_job(self, hearing_id: str) -> bool:
+        """Move a failed hearing job back to pending."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute("""
+            UPDATE hearing_jobs
+            SET status = 'pending',
+                available_at = ?,
+                claimed_by = NULL,
+                lease_expires_at = NULL
+            WHERE hearing_id = ?
+              AND status = 'failed'
+        """, (now, hearing_id))
+        if cursor.rowcount:
+            conn.execute("""
+                UPDATE dead_letter_items
+                SET requeued_at = ?, resolved_at = ?
+                WHERE item_type = 'hearing_job'
+                  AND item_key = ?
+                  AND resolved_at IS NULL
+            """, (now, now, hearing_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def requeue_outbox_event(self, event_id: str) -> bool:
+        """Move a dead-letter outbox event back to pending."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute("""
+            UPDATE delivery_outbox_items
+            SET status = 'pending',
+                available_at = ?,
+                claimed_by = NULL,
+                lease_expires_at = NULL
+            WHERE event_id = ?
+              AND status = 'dead_letter'
+        """, (now, event_id))
+        if cursor.rowcount:
+            conn.execute("""
+                UPDATE dead_letter_items
+                SET requeued_at = ?, resolved_at = ?
+                WHERE item_type = 'outbox_event'
+                  AND item_key = ?
+                  AND resolved_at IS NULL
+            """, (now, now, event_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def get_queue_health(self) -> dict:
+        """Return queue/dead-letter metrics for operator health checks."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+
+        def _counts(table: str, status_col: str = "status") -> dict[str, int]:
+            rows = conn.execute(
+                f"SELECT {status_col}, COUNT(*) AS n FROM {table} GROUP BY {status_col}"
+            ).fetchall()
+            return {row[status_col]: row["n"] for row in rows}
+
+        hearing_counts = _counts("hearing_jobs")
+        outbox_counts = _counts("delivery_outbox_items")
+        stage_counts = _counts("stage_tasks")
+
+        stale_hearing_leases = conn.execute("""
+            SELECT COUNT(*) AS n
+            FROM hearing_jobs
+            WHERE status = 'running'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < ?
+        """, (now,)).fetchone()["n"]
+        stale_outbox_leases = conn.execute("""
+            SELECT COUNT(*) AS n
+            FROM delivery_outbox_items
+            WHERE status = 'processing'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < ?
+        """, (now,)).fetchone()["n"]
+
+        retry_rows = conn.execute("""
+            SELECT attempt_count, COUNT(*) AS n
+            FROM hearing_jobs
+            WHERE status IN ('pending', 'running', 'failed')
+            GROUP BY attempt_count
+            ORDER BY attempt_count
+        """).fetchall()
+        hearing_retry_histogram = {str(row["attempt_count"]): row["n"] for row in retry_rows}
+
+        outbox_retry_rows = conn.execute("""
+            SELECT attempt_count, COUNT(*) AS n
+            FROM delivery_outbox_items
+            WHERE status IN ('pending', 'processing', 'dead_letter')
+            GROUP BY attempt_count
+            ORDER BY attempt_count
+        """).fetchall()
+        outbox_retry_histogram = {str(row["attempt_count"]): row["n"] for row in outbox_retry_rows}
+
+        oldest_hearing = conn.execute("""
+            SELECT MIN(enqueued_at) AS oldest
+            FROM hearing_jobs
+            WHERE status = 'pending'
+        """).fetchone()["oldest"]
+        oldest_outbox = conn.execute("""
+            SELECT MIN(enqueued_at) AS oldest
+            FROM delivery_outbox_items
+            WHERE status = 'pending'
+        """).fetchone()["oldest"]
+
+        def _age_seconds(oldest_ts: str | None) -> int | None:
+            if not oldest_ts:
+                return None
+            oldest_dt = _ensure_utc(datetime.fromisoformat(oldest_ts))
+            return int((datetime.now(timezone.utc) - oldest_dt).total_seconds())
+
+        dlq_total = (
+            hearing_counts.get("failed", 0)
+            + outbox_counts.get("dead_letter", 0)
+            + conn.execute(
+                "SELECT COUNT(*) AS n FROM dead_letter_items WHERE resolved_at IS NULL"
+            ).fetchone()["n"]
+        )
+
+        return {
+            "hearing_jobs": hearing_counts,
+            "outbox_items": outbox_counts,
+            "stage_tasks": stage_counts,
+            "stale_leases": {
+                "hearing_jobs": stale_hearing_leases,
+                "outbox_items": stale_outbox_leases,
+            },
+            "max_queue_age_seconds": {
+                "hearing_jobs": _age_seconds(oldest_hearing),
+                "outbox_items": _age_seconds(oldest_outbox),
+            },
+            "retry_histogram": {
+                "hearing_jobs": hearing_retry_histogram,
+                "outbox_items": outbox_retry_histogram,
+            },
+            "dead_letter_count": dlq_total,
+        }
+
+    def _upsert_dead_letter_item(
+        self,
+        conn: sqlite3.Connection,
+        item_type: str,
+        item_key: str,
+        stage: str | None,
+        error: str,
+        attempt_count: int,
+        payload: dict | None = None,
+    ) -> None:
+        """Insert or update dead-letter row for a terminally failed item."""
+        now = datetime.now(timezone.utc).isoformat()
+        payload_json = json.dumps(payload) if payload is not None else None
+        row = conn.execute("""
+            SELECT id, first_failed_at
+            FROM dead_letter_items
+            WHERE item_type = ?
+              AND item_key = ?
+              AND stage IS ?
+              AND resolved_at IS NULL
+            LIMIT 1
+        """, (item_type, item_key, stage)).fetchone()
+
+        if row is None:
+            conn.execute("""
+                INSERT INTO dead_letter_items
+                    (item_type, item_key, stage, payload_json, error, attempt_count,
+                     first_failed_at, last_failed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                item_type, item_key, stage, payload_json, error, attempt_count, now, now,
+            ))
+        else:
+            conn.execute("""
+                UPDATE dead_letter_items
+                SET payload_json = COALESCE(?, payload_json),
+                    error = ?,
+                    attempt_count = ?,
+                    last_failed_at = ?
+                WHERE id = ?
+            """, (payload_json, error, attempt_count, now, row["id"]))
 
     def get_unprocessed_hearings(self) -> list[dict]:
         """Return hearings that haven't been fully processed."""

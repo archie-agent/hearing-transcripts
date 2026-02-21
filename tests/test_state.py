@@ -457,6 +457,14 @@ class TestHearingJobQueue:
         assert row_2["attempt_count"] == 2
         assert row_2["last_error"] == "second"
 
+        dlq = st._get_conn().execute("""
+            SELECT item_type, item_key, error
+            FROM dead_letter_items
+            WHERE item_type = 'hearing_job' AND item_key = 'h2'
+        """).fetchone()
+        assert dlq is not None
+        assert dlq["error"] == "second"
+
     def test_get_hearing_parses_sources_json(self, tmp_path):
         st = State(db_path=tmp_path / "test.db")
         st.record_hearing(
@@ -471,6 +479,31 @@ class TestHearingJobQueue:
         assert row is not None
         assert row["id"] == "h3"
         assert row["sources"]["youtube_url"] == "https://youtube.com/watch?v=abc123"
+
+    def test_requeue_failed_hearing_job(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.record_hearing("h4", "house.judiciary", "2026-02-10", "Hearing", "slug", {})
+        st.enqueue_hearing_job(
+            hearing_id="h4",
+            run_id="run-1",
+            committee_key="house.judiciary",
+            hearing_date="2026-02-10",
+            title="Hearing",
+        )
+        st._get_conn().execute(
+            "UPDATE hearing_jobs SET status = 'failed' WHERE hearing_id = ?",
+            ("h4",),
+        )
+        st._get_conn().commit()
+
+        changed = st.requeue_failed_hearing_job("h4")
+        assert changed is True
+        row = st._get_conn().execute(
+            "SELECT status, available_at FROM hearing_jobs WHERE hearing_id = ?",
+            ("h4",),
+        ).fetchone()
+        assert row["status"] == "pending"
+        assert row["available_at"] is not None
 
 
 class TestOutboxQueue:
@@ -537,3 +570,65 @@ class TestOutboxQueue:
         assert row_2["status"] == "dead_letter"
         assert row_2["attempt_count"] == 2
         assert row_2["last_error"] == "second"
+
+        dlq = st._get_conn().execute("""
+            SELECT item_type, item_key, error
+            FROM dead_letter_items
+            WHERE item_type = 'outbox_event' AND item_key = 'ev2'
+        """).fetchone()
+        assert dlq is not None
+        assert dlq["error"] == "second"
+
+    def test_requeue_outbox_event_moves_dead_letter_to_pending(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.enqueue_outbox_event(
+            event_id="ev3",
+            event_type="transcript_published",
+            hearing_id="h3",
+            payload={"hearing_id": "h3"},
+            publish_version=1,
+        )
+        st._get_conn().execute(
+            "UPDATE delivery_outbox_items SET status = 'dead_letter' WHERE event_id = ?",
+            ("ev3",),
+        )
+        st._get_conn().commit()
+
+        changed = st.requeue_outbox_event("ev3")
+        assert changed is True
+        row = st._get_conn().execute(
+            "SELECT status, available_at FROM delivery_outbox_items WHERE event_id = ?",
+            ("ev3",),
+        ).fetchone()
+        assert row["status"] == "pending"
+        assert row["available_at"] is not None
+
+
+class TestQueueHealth:
+    def test_queue_health_shape(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.record_hearing("h1", "house.judiciary", "2026-02-10", "Hearing", "slug", {})
+        st.enqueue_hearing_job(
+            hearing_id="h1",
+            run_id="run-1",
+            committee_key="house.judiciary",
+            hearing_date="2026-02-10",
+            title="Hearing",
+        )
+        st.enqueue_outbox_event(
+            event_id="ev-health",
+            event_type="transcript_published",
+            hearing_id="h1",
+            payload={"hearing_id": "h1"},
+            publish_version=1,
+        )
+        st.mark_stage_task("h1", "captions", "running")
+
+        health = st.get_queue_health()
+        assert "hearing_jobs" in health
+        assert "outbox_items" in health
+        assert "stage_tasks" in health
+        assert "stale_leases" in health
+        assert "max_queue_age_seconds" in health
+        assert "retry_histogram" in health
+        assert "dead_letter_count" in health

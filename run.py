@@ -591,6 +591,9 @@ def main():
     parser.add_argument("--worker-id", type=str, default=None, help="Worker identity when using --drain-only")
     parser.add_argument("--max-tasks", type=int, default=20, help="Max queued hearing jobs to claim in one drain run")
     parser.add_argument("--lease-seconds", type=int, default=900, help="Lease duration for claimed queue jobs")
+    parser.add_argument("--queue-health", action="store_true", help="Print queue/dead-letter health metrics and exit")
+    parser.add_argument("--requeue-hearing-job", type=str, default=None, help="Move failed hearing job back to pending by hearing ID")
+    parser.add_argument("--requeue-outbox-event", type=str, default=None, help="Move dead-letter outbox event back to pending by event ID")
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     args = parser.parse_args()
 
@@ -600,6 +603,15 @@ def main():
         parser.error("--discover-only cannot be combined with --drain-only")
     if args.discover_only and args.enqueue_only:
         parser.error("--discover-only cannot be combined with --enqueue-only")
+    admin_ops = sum(bool(v) for v in (
+        args.queue_health,
+        args.requeue_hearing_job,
+        args.requeue_outbox_event,
+    ))
+    if admin_ops > 1:
+        parser.error("choose only one of --queue-health, --requeue-hearing-job, --requeue-outbox-event")
+    if admin_ops and (args.discover_only or args.enqueue_only or args.drain_only):
+        parser.error("queue admin ops cannot be combined with discovery/queue run modes")
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -645,6 +657,29 @@ def main():
             "Run %s: monitoring %d committees, looking back %d day(s), max cost $%.2f",
             run_id, len(active), args.days, max_cost,
         )
+
+        if args.queue_health:
+            print(json.dumps(state.get_queue_health(), indent=2))
+            queue_status = "queue_health"
+            return
+        if args.requeue_hearing_job:
+            changed = state.requeue_failed_hearing_job(args.requeue_hearing_job)
+            if changed:
+                log.info("Requeued failed hearing job: %s", args.requeue_hearing_job)
+                queue_status = "requeue_hearing_job_done"
+            else:
+                log.info("No failed hearing job to requeue: %s", args.requeue_hearing_job)
+                queue_status = "requeue_hearing_job_noop"
+            return
+        if args.requeue_outbox_event:
+            changed = state.requeue_outbox_event(args.requeue_outbox_event)
+            if changed:
+                log.info("Requeued dead-letter outbox event: %s", args.requeue_outbox_event)
+                queue_status = "requeue_outbox_event_done"
+            else:
+                log.info("No dead-letter outbox event to requeue: %s", args.requeue_outbox_event)
+                queue_status = "requeue_outbox_event_noop"
+            return
 
         if args.drain_only:
             worker_id = args.worker_id or f"worker-{os.getpid()}"
