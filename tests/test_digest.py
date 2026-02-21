@@ -10,6 +10,7 @@ import pytest
 
 from digest import (
     Quote,
+    _events_to_transcripts,
     _markdown_to_simple_html,
     compose_digest,
     find_recent_transcripts,
@@ -139,6 +140,51 @@ class TestFindRecentTranscripts:
         result = find_recent_transcripts(lookback_days=7)
 
         assert len(result) == 1
+
+
+class TestEventsToTranscripts:
+    def test_maps_valid_transcript_published_events(self, tmp_path):
+        transcript_file = tmp_path / "t1.txt"
+        transcript_file.write_text("Transcript content", encoding="utf-8")
+        events = [{
+            "event_id": "ev1",
+            "event_type": "transcript_published",
+            "payload": {
+                "hearing_id": "h1",
+                "title": "Hearing 1",
+                "committee": "House Judiciary",
+                "date": "2026-02-10",
+                "transcript_path": str(transcript_file),
+                "sources": {"youtube_url": "https://youtube.com/watch?v=abc123"},
+            },
+        }]
+
+        transcripts, event_ids = _events_to_transcripts(events)
+
+        assert len(transcripts) == 1
+        assert event_ids == ["ev1"]
+        assert transcripts[0]["id"] == "h1"
+        assert transcripts[0]["transcript_path"] == str(transcript_file)
+        assert transcripts[0]["meta"]["sources"]["youtube_url"].startswith("https://youtube.com")
+
+    def test_skips_non_transcript_or_missing_files(self, tmp_path):
+        events = [
+            {
+                "event_id": "ev-not-type",
+                "event_type": "other_event",
+                "payload": {"hearing_id": "h1", "transcript_path": str(tmp_path / "a.txt")},
+            },
+            {
+                "event_id": "ev-missing-file",
+                "event_type": "transcript_published",
+                "payload": {"hearing_id": "h2", "transcript_path": str(tmp_path / "missing.txt")},
+            },
+        ]
+
+        transcripts, event_ids = _events_to_transcripts(events)
+
+        assert transcripts == []
+        assert event_ids == []
 
 
 class TestMarkdownToSimpleHtml:

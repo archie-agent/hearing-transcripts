@@ -75,6 +75,48 @@ class TestHearingFromStateRow:
 
 
 # ---------------------------------------------------------------------------
+# _emit_transcript_published_event
+# ---------------------------------------------------------------------------
+
+class TestEmitTranscriptPublishedEvent:
+
+    def test_enqueues_outbox_event_when_queue_write_enabled(self, monkeypatch, tmp_path):
+        from run import _emit_transcript_published_event
+
+        hearing = _make_hearing(
+            committee_key="house.judiciary",
+            committee_name="House Judiciary",
+            date="2026-02-10",
+            sources={"youtube_url": "https://youtube.com/watch?v=abc123"},
+        )
+        state = MagicMock()
+        result = {"cost": {"total_usd": 0.12}}
+        monkeypatch.setattr("run.config.QUEUE_WRITE_ENABLED", True)
+        monkeypatch.setattr("run.config.TRANSCRIPTS_DIR", tmp_path / "transcripts")
+
+        _emit_transcript_published_event(hearing, state, result)
+
+        state.enqueue_outbox_event.assert_called_once()
+        kwargs = state.enqueue_outbox_event.call_args.kwargs
+        assert kwargs["event_type"] == "transcript_published"
+        assert kwargs["hearing_id"] == hearing.id
+        assert kwargs["event_id"].startswith(f"transcript_published:{hearing.id}:v1")
+        assert kwargs["payload"]["path"] == f"{hearing.committee_key}/{hearing.date}_{hearing.id}"
+        assert kwargs["payload"]["cost"]["total_usd"] == 0.12
+
+    def test_noop_when_queue_write_disabled(self, monkeypatch):
+        from run import _emit_transcript_published_event
+
+        hearing = _make_hearing()
+        state = MagicMock()
+        monkeypatch.setattr("run.config.QUEUE_WRITE_ENABLED", False)
+
+        _emit_transcript_published_event(hearing, state, {"cost": {}})
+
+        state.enqueue_outbox_event.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # _reconcile_hearing_id
 # ---------------------------------------------------------------------------
 

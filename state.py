@@ -868,6 +868,166 @@ class State:
         result["sources"] = json.loads(sources_json) if sources_json else {}
         return result
 
+    # ------------------------------------------------------------------
+    # Delivery outbox queue (phase 4 digest handoff)
+    # ------------------------------------------------------------------
+
+    def enqueue_outbox_event(
+        self,
+        event_id: str,
+        event_type: str,
+        hearing_id: str | None,
+        payload: dict,
+        publish_version: int = 1,
+    ) -> None:
+        """Insert an outbox event if it does not already exist."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("""
+            INSERT OR IGNORE INTO delivery_outbox_items
+                (event_id, event_type, hearing_id, publish_version, status,
+                 payload_json, attempt_count, max_attempts, available_at, enqueued_at)
+            VALUES (?, ?, ?, ?, 'pending', ?, 0, 5, ?, ?)
+        """, (
+            event_id,
+            event_type,
+            hearing_id,
+            publish_version,
+            json.dumps(payload),
+            now,
+            now,
+        ))
+        conn.commit()
+
+    def reclaim_expired_outbox_leases(self) -> int:
+        """Move expired processing outbox rows back to pending."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute("""
+            UPDATE delivery_outbox_items
+            SET status = 'pending',
+                claimed_by = NULL,
+                lease_expires_at = NULL,
+                available_at = ?,
+                last_error = COALESCE(last_error, 'lease expired')
+            WHERE status = 'processing'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < ?
+        """, (now, now))
+        conn.commit()
+        return cursor.rowcount
+
+    def claim_outbox_events(
+        self,
+        worker_id: str,
+        limit: int = 20,
+        lease_seconds: int = 900,
+    ) -> list[dict]:
+        """Claim pending outbox events for processing."""
+        conn = self._get_conn()
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_until = (now_dt + timedelta(seconds=max(lease_seconds, 1))).isoformat()
+
+        self.reclaim_expired_outbox_leases()
+
+        cursor = conn.execute("""
+            SELECT event_id
+            FROM delivery_outbox_items
+            WHERE status = 'pending'
+              AND (available_at IS NULL OR available_at <= ?)
+            ORDER BY available_at ASC, enqueued_at ASC
+            LIMIT ?
+        """, (now, limit))
+        event_ids = [row["event_id"] for row in cursor.fetchall()]
+        if not event_ids:
+            return []
+
+        claimed: list[dict] = []
+        for event_id in event_ids:
+            update = conn.execute("""
+                UPDATE delivery_outbox_items
+                SET status = 'processing',
+                    claimed_by = ?,
+                    lease_expires_at = ?,
+                    attempt_count = attempt_count + 1
+                WHERE event_id = ?
+                  AND status = 'pending'
+                  AND (available_at IS NULL OR available_at <= ?)
+            """, (worker_id, lease_until, event_id, now))
+            if update.rowcount == 0:
+                continue
+
+            row = conn.execute("""
+                SELECT event_id, event_type, hearing_id, publish_version, status,
+                       payload_json, attempt_count, max_attempts, claimed_by, lease_expires_at
+                FROM delivery_outbox_items
+                WHERE event_id = ?
+            """, (event_id,)).fetchone()
+            if row is None:
+                continue
+            record = dict(row)
+            payload_json = record.get("payload_json")
+            record["payload"] = json.loads(payload_json) if payload_json else {}
+            claimed.append(record)
+
+        conn.commit()
+        return claimed
+
+    def complete_outbox_event(self, event_id: str) -> None:
+        """Mark outbox event as delivered."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("""
+            UPDATE delivery_outbox_items
+            SET status = 'delivered',
+                delivered_at = ?,
+                claimed_by = NULL,
+                lease_expires_at = NULL,
+                last_error = NULL
+            WHERE event_id = ?
+        """, (now, event_id))
+        conn.commit()
+
+    def fail_outbox_event(self, event_id: str, error: str, base_delay_seconds: int = 120) -> None:
+        """Mark outbox event failed and schedule retry or terminal failure."""
+        conn = self._get_conn()
+        row = conn.execute("""
+            SELECT attempt_count, max_attempts
+            FROM delivery_outbox_items
+            WHERE event_id = ?
+        """, (event_id,)).fetchone()
+        if row is None:
+            return
+
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        attempt_count = int(row["attempt_count"] or 0)
+        max_attempts = int(row["max_attempts"] or 5)
+        if attempt_count >= max_attempts:
+            conn.execute("""
+                UPDATE delivery_outbox_items
+                SET status = 'dead_letter',
+                    claimed_by = NULL,
+                    lease_expires_at = NULL,
+                    last_error = ?
+                WHERE event_id = ?
+            """, (error, event_id))
+        else:
+            delay_seconds = base_delay_seconds * (2 ** max(attempt_count - 1, 0))
+            delay_seconds = min(delay_seconds, 3600)
+            available_at = (now_dt + timedelta(seconds=delay_seconds)).isoformat()
+            conn.execute("""
+                UPDATE delivery_outbox_items
+                SET status = 'pending',
+                    available_at = ?,
+                    claimed_by = NULL,
+                    lease_expires_at = NULL,
+                    last_error = ?
+                WHERE event_id = ?
+            """, (available_at, error, event_id))
+        conn.commit()
+
     def get_unprocessed_hearings(self) -> list[dict]:
         """Return hearings that haven't been fully processed."""
         conn = self._get_conn()

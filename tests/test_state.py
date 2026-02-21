@@ -471,3 +471,69 @@ class TestHearingJobQueue:
         assert row is not None
         assert row["id"] == "h3"
         assert row["sources"]["youtube_url"] == "https://youtube.com/watch?v=abc123"
+
+
+class TestOutboxQueue:
+    def test_enqueue_claim_complete_outbox_event(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.enqueue_outbox_event(
+            event_id="ev1",
+            event_type="transcript_published",
+            hearing_id="h1",
+            payload={"hearing_id": "h1", "transcript_path": "/tmp/t.txt"},
+            publish_version=1,
+        )
+        claimed = st.claim_outbox_events(worker_id="digest-worker", limit=5, lease_seconds=120)
+        assert len(claimed) == 1
+        assert claimed[0]["event_id"] == "ev1"
+        assert claimed[0]["status"] == "processing"
+        assert claimed[0]["payload"]["hearing_id"] == "h1"
+
+        st.complete_outbox_event("ev1")
+        row = st._get_conn().execute(
+            "SELECT status, delivered_at, last_error FROM delivery_outbox_items WHERE event_id = ?",
+            ("ev1",),
+        ).fetchone()
+        assert row["status"] == "delivered"
+        assert row["delivered_at"] is not None
+        assert row["last_error"] is None
+
+    def test_fail_outbox_event_retries_then_dead_letters(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.enqueue_outbox_event(
+            event_id="ev2",
+            event_type="transcript_published",
+            hearing_id="h2",
+            payload={"hearing_id": "h2"},
+            publish_version=1,
+        )
+        st._get_conn().execute(
+            "UPDATE delivery_outbox_items SET max_attempts = 2 WHERE event_id = ?",
+            ("ev2",),
+        )
+        st._get_conn().commit()
+
+        st.claim_outbox_events(worker_id="w1", limit=1, lease_seconds=30)
+        st.fail_outbox_event("ev2", "first")
+        row_1 = st._get_conn().execute(
+            "SELECT status, attempt_count, last_error FROM delivery_outbox_items WHERE event_id = ?",
+            ("ev2",),
+        ).fetchone()
+        assert row_1["status"] == "pending"
+        assert row_1["attempt_count"] == 1
+        assert row_1["last_error"] == "first"
+
+        st._get_conn().execute(
+            "UPDATE delivery_outbox_items SET available_at = ? WHERE event_id = ?",
+            ("1970-01-01T00:00:00+00:00", "ev2"),
+        )
+        st._get_conn().commit()
+        st.claim_outbox_events(worker_id="w2", limit=1, lease_seconds=30)
+        st.fail_outbox_event("ev2", "second")
+        row_2 = st._get_conn().execute(
+            "SELECT status, attempt_count, last_error FROM delivery_outbox_items WHERE event_id = ?",
+            ("ev2",),
+        ).fetchone()
+        assert row_2["status"] == "dead_letter"
+        assert row_2["attempt_count"] == 2
+        assert row_2["last_error"] == "second"

@@ -556,24 +556,26 @@ def deliver_digest(
 # ---------------------------------------------------------------------------
 
 
-def run_digest(dry_run: bool = False) -> None:
-    """Run the full digest pipeline."""
-    today = date.today().isoformat()
-
-    # Check if already sent today
-    state = State()
-    if not dry_run and state.last_digest_date() == today:
-        log.info("Digest already sent today (%s), skipping", today)
-        return
+def _run_digest_pipeline(
+    transcripts: list[dict],
+    dry_run: bool,
+    start_date: str,
+    end_date: str,
+    state: State | None = None,
+    record_digest_run: bool = False,
+) -> dict:
+    """Run extraction->scoring->compose->deliver for an explicit transcript list."""
+    if not transcripts:
+        return {
+            "sent": False,
+            "hearings_scanned": 0,
+            "quotes_extracted": 0,
+            "quotes_selected": 0,
+            "cost_usd": 0.0,
+        }
 
     api_key = get_api_key()
     total_cost = 0.0
-
-    # Step 1: Find recent transcripts
-    transcripts = find_recent_transcripts(config.DIGEST_LOOKBACK_DAYS)
-    if not transcripts:
-        log.info("No recent transcripts found, nothing to digest")
-        return
 
     # Step 2: Extract quotes
     all_quotes: list[Quote] = []
@@ -584,7 +586,13 @@ def run_digest(dry_run: bool = False) -> None:
 
     if not all_quotes:
         log.info("No quotes extracted, nothing to digest")
-        return
+        return {
+            "sent": False,
+            "hearings_scanned": len(transcripts),
+            "quotes_extracted": 0,
+            "quotes_selected": 0,
+            "cost_usd": total_cost,
+        }
 
     log.info("Total quotes extracted: %d", len(all_quotes))
 
@@ -594,29 +602,32 @@ def run_digest(dry_run: bool = False) -> None:
 
     if not scored_quotes:
         log.info("No quotes above threshold (%.2f)", config.DIGEST_SCORE_THRESHOLD)
-        return
+        return {
+            "sent": False,
+            "hearings_scanned": len(transcripts),
+            "quotes_extracted": len(all_quotes),
+            "quotes_selected": 0,
+            "cost_usd": total_cost,
+        }
 
     # Step 4: Compose digest
     body, compose_cost = compose_digest(scored_quotes, api_key)
     total_cost += compose_cost
 
     if not body:
-        log.error("Failed to compose digest")
-        return
+        raise ValueError("Failed to compose digest body")
 
     # Step 5: Polish
     polished, polish_cost = polish_digest(body, api_key)
     total_cost += polish_cost
 
     # Step 6: Deliver
-    start_date = (date.today() - timedelta(days=config.DIGEST_LOOKBACK_DAYS)).isoformat()
-    end_date = today
     sent = deliver_digest(polished, start_date, end_date, dry_run=dry_run)
 
     # Step 7: Record run
-    if sent and not dry_run:
+    if sent and not dry_run and record_digest_run and state is not None:
         state.record_digest_run(
-            run_date=today,
+            run_date=date.today().isoformat(),
             hearings_scanned=len(transcripts),
             quotes_extracted=len(all_quotes),
             quotes_selected=len(scored_quotes),
@@ -630,6 +641,127 @@ def run_digest(dry_run: bool = False) -> None:
         len(scored_quotes),
         total_cost,
     )
+    return {
+        "sent": sent,
+        "hearings_scanned": len(transcripts),
+        "quotes_extracted": len(all_quotes),
+        "quotes_selected": len(scored_quotes),
+        "cost_usd": total_cost,
+    }
+
+
+def run_digest(dry_run: bool = False) -> None:
+    """Run the legacy digest path from transcripts/index.json."""
+    today = date.today().isoformat()
+
+    # Check if already sent today
+    state = State()
+    if not dry_run and state.last_digest_date() == today:
+        log.info("Digest already sent today (%s), skipping", today)
+        return
+
+    transcripts = find_recent_transcripts(config.DIGEST_LOOKBACK_DAYS)
+    if not transcripts:
+        log.info("No recent transcripts found, nothing to digest")
+        return
+
+    start_date = (date.today() - timedelta(days=config.DIGEST_LOOKBACK_DAYS)).isoformat()
+    _run_digest_pipeline(
+        transcripts=transcripts,
+        dry_run=dry_run,
+        start_date=start_date,
+        end_date=today,
+        state=state,
+        record_digest_run=True,
+    )
+
+
+def _events_to_transcripts(events: list[dict]) -> tuple[list[dict], list[str]]:
+    """Convert claimed outbox events into digest transcript inputs."""
+    transcripts: list[dict] = []
+    event_ids: list[str] = []
+    seen_ids: set[str] = set()
+
+    for event in events:
+        event_id = event["event_id"]
+        if event.get("event_type") != "transcript_published":
+            continue
+        payload = event.get("payload", {})
+        hearing_id = payload.get("hearing_id", "")
+        transcript_path = payload.get("transcript_path", "")
+        if not hearing_id or hearing_id in seen_ids:
+            continue
+        if not transcript_path:
+            continue
+
+        path_obj = Path(transcript_path)
+        if not path_obj.exists():
+            continue
+
+        transcripts.append({
+            "id": hearing_id,
+            "title": payload.get("title", "Untitled Hearing"),
+            "committee": payload.get("committee", ""),
+            "date": payload.get("date", ""),
+            "transcript_path": transcript_path,
+            "meta": {"sources": payload.get("sources", {})},
+        })
+        seen_ids.add(hearing_id)
+        event_ids.append(event_id)
+
+    return transcripts, event_ids
+
+
+def consume_outbox_events(
+    dry_run: bool = False,
+    max_events: int = 20,
+    lease_seconds: int = 900,
+    worker_id: str | None = None,
+) -> None:
+    """Consume transcript-published outbox events and run digest pipeline."""
+    if not config.OUTBOX_DIGEST_ENABLED:
+        log.info("Outbox digest consumer disabled (OUTBOX_DIGEST_ENABLED=0)")
+        return
+
+    state = State()
+    worker = worker_id or f"digest-{os.getpid()}"
+    events = state.claim_outbox_events(
+        worker_id=worker,
+        limit=max(max_events, 1),
+        lease_seconds=max(lease_seconds, 30),
+    )
+    if not events:
+        log.info("Outbox consumer: no pending events")
+        return
+
+    transcripts, event_ids = _events_to_transcripts(events)
+    skipped = [e["event_id"] for e in events if e["event_id"] not in set(event_ids)]
+    for event_id in skipped:
+        state.fail_outbox_event(event_id, "event missing transcript payload or transcript path")
+
+    if not transcripts:
+        log.info("Outbox consumer: no valid transcript events")
+        return
+
+    dates = [t.get("date", "") for t in transcripts if t.get("date")]
+    start_date = min(dates) if dates else date.today().isoformat()
+    end_date = max(dates) if dates else date.today().isoformat()
+
+    try:
+        _run_digest_pipeline(
+            transcripts=transcripts,
+            dry_run=dry_run,
+            start_date=start_date,
+            end_date=end_date,
+            state=state,
+            record_digest_run=True,
+        )
+        for event_id in event_ids:
+            state.complete_outbox_event(event_id)
+    except Exception as e:
+        for event_id in event_ids:
+            state.fail_outbox_event(event_id, str(e))
+        raise
 
 
 if __name__ == "__main__":
@@ -644,6 +776,37 @@ if __name__ == "__main__":
         action="store_true",
         help="Extract, score, and compose but print to stdout instead of emailing",
     )
+    parser.add_argument(
+        "--consume-outbox",
+        action="store_true",
+        help="Consume transcript_published events from delivery outbox instead of scanning index.json",
+    )
+    parser.add_argument(
+        "--max-events",
+        type=int,
+        default=20,
+        help="Max outbox events to claim when --consume-outbox is set",
+    )
+    parser.add_argument(
+        "--lease-seconds",
+        type=int,
+        default=900,
+        help="Lease duration for outbox events when --consume-outbox is set",
+    )
+    parser.add_argument(
+        "--worker-id",
+        type=str,
+        default=None,
+        help="Worker identity used for outbox claims when --consume-outbox is set",
+    )
     args = parser.parse_args()
 
-    run_digest(dry_run=args.dry_run)
+    if args.consume_outbox:
+        consume_outbox_events(
+            dry_run=args.dry_run,
+            max_events=args.max_events,
+            lease_seconds=args.lease_seconds,
+            worker_id=args.worker_id,
+        )
+    else:
+        run_digest(dry_run=args.dry_run)

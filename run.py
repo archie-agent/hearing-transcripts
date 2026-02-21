@@ -148,6 +148,39 @@ def _hearing_from_state_row(row: dict) -> Hearing:
     )
 
 
+def _emit_transcript_published_event(hearing: Hearing, state: State, result: dict) -> None:
+    """Emit durable outbox event for downstream digest/notification consumers."""
+    if not config.QUEUE_WRITE_ENABLED:
+        return
+
+    publish_version = 1
+    event_id = f"transcript_published:{hearing.id}:v{publish_version}"
+    rel_path = f"{hearing.committee_key}/{hearing.date}_{hearing.id}"
+    transcript_path = config.TRANSCRIPTS_DIR / rel_path / "transcript.txt"
+    payload = {
+        "event_id": event_id,
+        "event_type": "transcript_published",
+        "hearing_id": hearing.id,
+        "committee": hearing.committee_name,
+        "committee_key": hearing.committee_key,
+        "date": hearing.date,
+        "title": hearing.title,
+        "published_at": datetime.now(timezone.utc).isoformat(),
+        "publish_version": publish_version,
+        "path": rel_path,
+        "transcript_path": str(transcript_path),
+        "sources": hearing.sources,
+        "cost": result.get("cost", {}),
+    }
+    state.enqueue_outbox_event(
+        event_id=event_id,
+        event_type="transcript_published",
+        hearing_id=hearing.id,
+        payload=payload,
+        publish_version=publish_version,
+    )
+
+
 def _step_youtube_captions(hearing: Hearing, state: State, hearing_dir: Path,
                            result: dict, cost: dict) -> None:
     """Step 1: YouTube captions + LLM cleanup."""
@@ -426,6 +459,7 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
     _mark_stage_task(state, hearing.id, "publish", "running")
     try:
         _publish_to_transcripts(hearing, hearing_dir, result)
+        _emit_transcript_published_event(hearing, state, result)
         _mark_stage_task(state, hearing.id, "publish", "done")
     except (OSError, ValueError) as e:
         _mark_stage_task(state, hearing.id, "publish", "failed", error=str(e))

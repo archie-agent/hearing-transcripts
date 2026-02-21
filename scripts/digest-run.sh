@@ -20,7 +20,11 @@ source "$VENV/bin/activate"
 
 cd "$PROJECT_DIR"
 LOG_FILE="$LOG_DIR/digest-$(date +%Y-%m-%d).log"
-python3 digest.py 2>&1 | tee "$LOG_FILE"
+if [[ "${OUTBOX_DIGEST_ENABLED:-0}" == "1" ]]; then
+    python3 digest.py --consume-outbox 2>&1 | tee "$LOG_FILE"
+else
+    python3 digest.py 2>&1 | tee "$LOG_FILE"
+fi
 RC="${PIPESTATUS[0]}"
 
 if [ "$RC" -ne 0 ]; then
