@@ -26,6 +26,16 @@ source "$VENV/bin/activate"
 cd "$PROJECT_DIR"
 LOG_FILE="$LOG_DIR/$(date +%Y-%m-%d).log"
 
+# Queue cutover defaults:
+# - default to queue read/write path for cron
+# - allow explicit rollback to monolith via USE_LEGACY_MONOLITH=1
+if [[ "${USE_LEGACY_MONOLITH:-0}" == "1" ]]; then
+    export QUEUE_READ_ENABLED=0
+else
+    export QUEUE_READ_ENABLED="${QUEUE_READ_ENABLED:-1}"
+fi
+export QUEUE_WRITE_ENABLED="${QUEUE_WRITE_ENABLED:-1}"
+
 if [[ "${QUEUE_READ_ENABLED:-0}" == "1" ]]; then
     # Producer/worker topology (durable discovery -> stage workers)
     python3 run.py --enqueue-discovery --days 3 --workers 1 2>&1 | tee "$LOG_FILE"

@@ -112,7 +112,7 @@ python run.py --list-dlq --dlq-limit 100
 Disable queue read path:
 
 ```bash
-export QUEUE_READ_ENABLED=0
+export USE_LEGACY_MONOLITH=1
 ```
 
 Force scheduler rollback to legacy digest index scan:

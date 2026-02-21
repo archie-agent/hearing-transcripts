@@ -207,21 +207,21 @@ Phase 5:
 
 - Phase 1 complete: queue scaffolding tables and queue run audit ledger are in `state.py`.
 - Phase 2 complete: stage dual-write is active for `captions`, `isvp`, `cspan`, `testimony`, `govinfo`, and `publish`.
-- Phase 3 complete: `run.py` supports `--enqueue-only` and `--drain-only` with leased hearing job claims.
+- Phase 3 complete: `run.py` supports `--enqueue-only` and `--drain-only` with leased stage-task claims.
 - Phase 4 complete: transcript publish emits durable outbox events; `digest.py` supports `--consume-outbox`.
 - Phase 5 complete: `run.py --queue-health`, `--requeue-hearing-job`, and `--requeue-outbox-event` are available.
 - Phase 5+ hardening: stage-task dead-letter + replay (`--requeue-stage-task`) and DLQ listing (`--list-dlq`) are now available.
-- Phase 6 in progress: scheduler scripts support producer/worker and outbox modes behind feature flags.
+- Phase 6 complete: scheduler scripts now default to queue producer/worker and outbox digest paths with explicit rollback switches.
+- Phase 7 complete: stage-task worker execution is claim/lease/ack driven (`claim_stage_tasks`, `complete_stage_task`, `fail_stage_task`) with stage chaining.
+- Phase 8 complete: durable discovery producer flow is claim/lease/ack driven (`--enqueue-discovery`, `--drain-discovery`).
+- Phase 9 complete: digest scheduler defaults to outbox consumer mode with `DIGEST_USE_LEGACY_INDEX=1` rollback.
+- Phase 10 complete: failure-injection coverage includes lease-expiry reclaim for stage and discovery queues.
+- Post-phase fix complete: committee-scoped congress discovery path is optimized and outbox publish events are only emitted when canonical transcript artifacts exist.
 
 ## Next actions and docs to update
 
-Immediate implementation order:
-1. Define queue schema and CLI mode flags (`enqueue-only`, `drain-only`) in `run.py`.
-2. Add queue/lease admin commands in `state.py`-backed tooling.
-3. Introduce transcript publish outbox event + digest consumer contract.
-
-Owner-visible docs/runbooks to update:
-- `scripts/daily-run.sh`
-- `scripts/digest-run.sh`
-- launchd plist operational notes currently referenced in `schedule.sh`
-- this file and a new queue operations runbook under `docs/`
+Operational follow-through:
+1. Keep `QUEUE_READ_ENABLED=1` for cron by default; set `USE_LEGACY_MONOLITH=1` only for emergency rollback.
+2. Keep digest on outbox path by default; set `DIGEST_USE_LEGACY_INDEX=1` only for emergency rollback.
+3. Track queue health SLOs (`--queue-health --health-max-queue-age ... --health-max-dlq ...`) in scheduled checks.
+4. Revisit congress API committee filtering when upstream API adds first-class committee query support.
