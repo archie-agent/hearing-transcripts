@@ -434,6 +434,68 @@ class TestQueueScaffolding:
         assert row["completed_at"] is not None
         assert "days" in row["payload_json"]
 
+    def test_reclaim_expired_stage_task_lease(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.enqueue_stage_task("h-lease", "captions", publish_version=1)
+        claimed_1 = st.claim_stage_tasks(worker_id="worker-a", limit=1, lease_seconds=60)
+        assert len(claimed_1) == 1
+        assert claimed_1[0]["status"] == "running"
+
+        expired = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        st._get_conn().execute(
+            "UPDATE stage_tasks SET lease_expires_at = ? WHERE hearing_id = ? AND stage = ?",
+            (expired, "h-lease", "captions"),
+        )
+        st._get_conn().commit()
+
+        reclaimed = st.reclaim_expired_stage_task_leases()
+        assert reclaimed == 1
+        row = st.get_stage_task("h-lease", "captions")
+        assert row is not None
+        assert row["status"] == "pending"
+        assert row["claimed_by"] is None
+        assert row["lease_expires_at"] is None
+        assert row["last_error"] == "lease expired"
+
+        claimed_2 = st.claim_stage_tasks(worker_id="worker-b", limit=1, lease_seconds=60)
+        assert len(claimed_2) == 1
+        assert claimed_2[0]["hearing_id"] == "h-lease"
+        assert claimed_2[0]["stage"] == "captions"
+        assert claimed_2[0]["attempt_count"] == 2
+        assert claimed_2[0]["claimed_by"] == "worker-b"
+
+    def test_reclaim_expired_discovery_job_lease(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.enqueue_discovery_job("discover:lease", run_id="run-lease", payload={"days": 2})
+        claimed_1 = st.claim_discovery_jobs(worker_id="producer-a", limit=1, lease_seconds=60)
+        assert len(claimed_1) == 1
+        assert claimed_1[0]["status"] == "running"
+
+        expired = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        st._get_conn().execute(
+            "UPDATE discovery_jobs SET lease_expires_at = ? WHERE job_id = ?",
+            (expired, "discover:lease"),
+        )
+        st._get_conn().commit()
+
+        reclaimed = st.reclaim_expired_discovery_job_leases()
+        assert reclaimed == 1
+        row = st._get_conn().execute(
+            "SELECT status, claimed_by, lease_expires_at, last_error FROM discovery_jobs WHERE job_id = ?",
+            ("discover:lease",),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "pending"
+        assert row["claimed_by"] is None
+        assert row["lease_expires_at"] is None
+        assert row["last_error"] == "lease expired"
+
+        claimed_2 = st.claim_discovery_jobs(worker_id="producer-b", limit=1, lease_seconds=60)
+        assert len(claimed_2) == 1
+        assert claimed_2[0]["job_id"] == "discover:lease"
+        assert claimed_2[0]["attempt_count"] == 2
+        assert claimed_2[0]["claimed_by"] == "producer-b"
+
 
 class TestHearingJobQueue:
     def test_enqueue_and_claim_and_complete(self, tmp_path):
