@@ -436,6 +436,91 @@ class State:
 
         conn.commit()
 
+    def mark_stage_task(
+        self,
+        hearing_id: str,
+        stage: str,
+        status: str,
+        error: str | None = None,
+        publish_version: int = 1,
+        payload: dict | None = None,
+    ) -> None:
+        """Upsert stage-level queue status for dual-write rollout."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        payload_json = json.dumps(payload) if payload is not None else None
+
+        cursor = conn.execute("""
+            SELECT task_id FROM stage_tasks
+            WHERE hearing_id = ? AND stage = ? AND publish_version = ?
+        """, (hearing_id, stage, publish_version))
+        exists = cursor.fetchone() is not None
+
+        if exists:
+            if status == "running":
+                conn.execute("""
+                    UPDATE stage_tasks
+                    SET status = ?,
+                        attempt_count = attempt_count + 1,
+                        started_at = ?,
+                        completed_at = NULL,
+                        last_error = NULL,
+                        payload_json = COALESCE(?, payload_json)
+                    WHERE hearing_id = ? AND stage = ? AND publish_version = ?
+                """, (status, now, payload_json, hearing_id, stage, publish_version))
+            elif status in ("done", "failed"):
+                conn.execute("""
+                    UPDATE stage_tasks
+                    SET status = ?,
+                        completed_at = ?,
+                        last_error = ?,
+                        payload_json = COALESCE(?, payload_json)
+                    WHERE hearing_id = ? AND stage = ? AND publish_version = ?
+                """, (status, now, error, payload_json, hearing_id, stage, publish_version))
+            else:
+                conn.execute("""
+                    UPDATE stage_tasks
+                    SET status = ?,
+                        last_error = ?,
+                        payload_json = COALESCE(?, payload_json)
+                    WHERE hearing_id = ? AND stage = ? AND publish_version = ?
+                """, (status, error, payload_json, hearing_id, stage, publish_version))
+        else:
+            attempt_count = 1 if status in ("running", "done", "failed") else 0
+            if status == "running":
+                conn.execute("""
+                    INSERT INTO stage_tasks
+                        (hearing_id, stage, publish_version, status, attempt_count,
+                         available_at, enqueued_at, started_at, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    hearing_id, stage, publish_version, status, attempt_count,
+                    now, now, now, payload_json,
+                ))
+            elif status in ("done", "failed"):
+                conn.execute("""
+                    INSERT INTO stage_tasks
+                        (hearing_id, stage, publish_version, status, attempt_count,
+                         available_at, enqueued_at, started_at, completed_at,
+                         last_error, payload_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    hearing_id, stage, publish_version, status, attempt_count,
+                    now, now, now, now, error, payload_json,
+                ))
+            else:
+                conn.execute("""
+                    INSERT INTO stage_tasks
+                        (hearing_id, stage, publish_version, status, attempt_count,
+                         available_at, enqueued_at, payload_json, last_error)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    hearing_id, stage, publish_version, status, attempt_count,
+                    now, now, payload_json, error,
+                ))
+
+        conn.commit()
+
     def record_scraper_run(self, committee_key: str, source_type: str,
                           count: int, error: str | None = None) -> None:
         """Log a scraper run result for health monitoring."""

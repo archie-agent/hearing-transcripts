@@ -116,6 +116,24 @@ def _migrate_hearing_id(old_id: str, hearing: Hearing, state: State) -> None:
         os.replace(tmp, index_path)
 
 
+def _mark_stage_task(
+    state: State,
+    hearing_id: str,
+    stage: str,
+    status: str,
+    error: str | None = None,
+) -> None:
+    """Dual-write stage status into queue scaffolding tables."""
+    if not config.QUEUE_WRITE_ENABLED:
+        return
+    state.mark_stage_task(
+        hearing_id=hearing_id,
+        stage=stage,
+        status=status,
+        error=error,
+    )
+
+
 def _step_youtube_captions(hearing: Hearing, state: State, hearing_dir: Path,
                            result: dict, cost: dict) -> None:
     """Step 1: YouTube captions + LLM cleanup."""
@@ -123,6 +141,7 @@ def _step_youtube_captions(hearing: Hearing, state: State, hearing_dir: Path,
     if youtube_url:
         if not state.is_step_done(hearing.id, "captions"):
             state.mark_step(hearing.id, "captions", "running")
+            _mark_stage_task(state, hearing.id, "captions", "running")
             try:
                 audio_result = process_hearing_audio(
                     youtube_url, hearing_dir,
@@ -134,14 +153,17 @@ def _step_youtube_captions(hearing: Hearing, state: State, hearing_dir: Path,
                 cost["whisper_usd"] += audio_result.get("whisper_cost_usd", 0)
                 state.mark_step(hearing.id, "captions", "done")
                 state.mark_step(hearing.id, "cleanup", "done")
+                _mark_stage_task(state, hearing.id, "captions", "done")
             except (subprocess.SubprocessError, httpx.HTTPError, OSError, ValueError) as e:
                 state.mark_step(hearing.id, "captions", "failed", error=str(e))
+                _mark_stage_task(state, hearing.id, "captions", "failed", error=str(e))
                 log.error("Caption processing failed for %s: %s", hearing.id, e)
         else:
             log.info("Captions already processed for %s", hearing.id)
     else:
         state.mark_step(hearing.id, "captions", "done")
         state.mark_step(hearing.id, "cleanup", "done")
+        _mark_stage_task(state, hearing.id, "captions", "done")
 
 
 def _step_isvp_captions(hearing: Hearing, state: State, hearing_dir: Path,
@@ -154,6 +176,7 @@ def _step_isvp_captions(hearing: Hearing, state: State, hearing_dir: Path,
 
     if not state.is_step_done(hearing.id, "isvp_fetched"):
         state.mark_step(hearing.id, "isvp", "running")
+        _mark_stage_task(state, hearing.id, "isvp", "running")
         try:
             from isvp import fetch_isvp_captions
             isvp_text = fetch_isvp_captions(isvp_comm, isvp_filename)
@@ -171,8 +194,10 @@ def _step_isvp_captions(hearing: Hearing, state: State, hearing_dir: Path,
                 state.mark_step(hearing.id, "isvp_fetched", "done")
                 log.info("ISVP captions: %d chars for %s", len(isvp_text), hearing.id)
             state.mark_step(hearing.id, "isvp", "done")
+            _mark_stage_task(state, hearing.id, "isvp", "done")
         except (httpx.HTTPError, OSError, ValueError) as e:
             state.mark_step(hearing.id, "isvp", "failed", error=str(e))
+            _mark_stage_task(state, hearing.id, "isvp", "failed", error=str(e))
             log.error("ISVP caption fetch failed for %s: %s", hearing.id, e)
     else:
         log.debug("ISVP transcript already fetched for %s", hearing.id)
@@ -223,6 +248,7 @@ def _step_cspan_captions(hearing: Hearing, state: State, hearing_dir: Path,
     # This allows retry if a previous run attempted but found no transcript.
     if not state.is_step_done(hearing.id, "cspan_fetched"):
         state.mark_step(hearing.id, "cspan", "running")
+        _mark_stage_task(state, hearing.id, "cspan", "running")
         try:
             import cspan
             witnesses = hearing.sources.get("witnesses")
@@ -233,11 +259,14 @@ def _step_cspan_captions(hearing: Hearing, state: State, hearing_dir: Path,
                 result["outputs"]["cspan_transcript"] = str(transcript_path)
                 state.mark_step(hearing.id, "cspan_fetched", "done")
             state.mark_step(hearing.id, "cspan", "done")
+            _mark_stage_task(state, hearing.id, "cspan", "done")
         except ImportError:
             log.debug("cspan module not available, skipping")
             state.mark_step(hearing.id, "cspan", "done")
+            _mark_stage_task(state, hearing.id, "cspan", "done")
         except (TimeoutError, OSError, ValueError) as e:
             state.mark_step(hearing.id, "cspan", "failed", error=str(e))
+            _mark_stage_task(state, hearing.id, "cspan", "failed", error=str(e))
             log.error("C-SPAN caption fetch failed for %s: %s", hearing.id, e)
     else:
         log.debug("C-SPAN transcript already fetched for %s", hearing.id)
@@ -283,17 +312,21 @@ def _step_testimony_pdfs(hearing: Hearing, state: State, hearing_dir: Path,
     if pdf_urls:
         if not state.is_step_done(hearing.id, "testimony"):
             state.mark_step(hearing.id, "testimony", "running")
+            _mark_stage_task(state, hearing.id, "testimony", "running")
             try:
                 testimony_dir = hearing_dir / "testimony"
                 testimony_dir.mkdir(exist_ok=True)
                 pdf_results = process_testimony_pdfs(pdf_urls, hearing_dir)
                 result["outputs"]["testimony"] = pdf_results
                 state.mark_step(hearing.id, "testimony", "done")
+                _mark_stage_task(state, hearing.id, "testimony", "done")
             except (httpx.HTTPError, OSError, ValueError) as e:
                 state.mark_step(hearing.id, "testimony", "failed", error=str(e))
+                _mark_stage_task(state, hearing.id, "testimony", "failed", error=str(e))
                 log.error("Testimony extraction failed for %s: %s", hearing.id, e)
     else:
         state.mark_step(hearing.id, "testimony", "done")
+        _mark_stage_task(state, hearing.id, "testimony", "done")
 
 
 def _step_govinfo_transcript(hearing: Hearing, state: State, hearing_dir: Path,
@@ -303,16 +336,20 @@ def _step_govinfo_transcript(hearing: Hearing, state: State, hearing_dir: Path,
     if govinfo_id:
         if not state.is_step_done(hearing.id, "govinfo"):
             state.mark_step(hearing.id, "govinfo", "running")
+            _mark_stage_task(state, hearing.id, "govinfo", "running")
             try:
                 gpo_path = fetch_govinfo_transcript(govinfo_id, hearing_dir)
                 if gpo_path:
                     result["outputs"]["govinfo_transcript"] = str(gpo_path)
                 state.mark_step(hearing.id, "govinfo", "done")
+                _mark_stage_task(state, hearing.id, "govinfo", "done")
             except (httpx.HTTPError, OSError, ValueError) as e:
                 state.mark_step(hearing.id, "govinfo", "failed", error=str(e))
+                _mark_stage_task(state, hearing.id, "govinfo", "failed", error=str(e))
                 log.error("GovInfo fetch failed for %s: %s", hearing.id, e)
     else:
         state.mark_step(hearing.id, "govinfo", "done")
+        _mark_stage_task(state, hearing.id, "govinfo", "done")
 
 
 def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
@@ -372,7 +409,13 @@ def process_hearing(hearing: Hearing, state: State, run_dir: Path) -> dict:
     os.replace(tmp, meta_path)
 
     # Publish to transcripts/ canonical archive
-    _publish_to_transcripts(hearing, hearing_dir, result)
+    _mark_stage_task(state, hearing.id, "publish", "running")
+    try:
+        _publish_to_transcripts(hearing, hearing_dir, result)
+        _mark_stage_task(state, hearing.id, "publish", "done")
+    except (OSError, ValueError) as e:
+        _mark_stage_task(state, hearing.id, "publish", "failed", error=str(e))
+        raise
 
     return result
 

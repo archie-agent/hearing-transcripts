@@ -338,3 +338,51 @@ class TestQueueScaffolding:
         assert row["hearings_failed"] == 1
         assert row["role"] == "monolith"
         assert row["args"]["days"] == 1
+
+    def test_mark_stage_task_running_done(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.mark_stage_task("h1", "captions", "running")
+        st.mark_stage_task("h1", "captions", "done")
+
+        conn = st._get_conn()
+        row = conn.execute("""
+            SELECT status, attempt_count, completed_at, last_error
+            FROM stage_tasks
+            WHERE hearing_id = ? AND stage = ? AND publish_version = 1
+        """, ("h1", "captions")).fetchone()
+        assert row is not None
+        assert row["status"] == "done"
+        assert row["attempt_count"] == 1
+        assert row["completed_at"] is not None
+        assert row["last_error"] is None
+
+    def test_mark_stage_task_failure_updates_error(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.mark_stage_task("h2", "cspan", "running")
+        st.mark_stage_task("h2", "cspan", "failed", error="network timeout")
+
+        conn = st._get_conn()
+        row = conn.execute("""
+            SELECT status, attempt_count, last_error
+            FROM stage_tasks
+            WHERE hearing_id = ? AND stage = ? AND publish_version = 1
+        """, ("h2", "cspan")).fetchone()
+        assert row is not None
+        assert row["status"] == "failed"
+        assert row["attempt_count"] == 1
+        assert row["last_error"] == "network timeout"
+
+    def test_mark_stage_task_running_twice_increments_attempt(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.mark_stage_task("h3", "govinfo", "running")
+        st.mark_stage_task("h3", "govinfo", "running")
+
+        conn = st._get_conn()
+        row = conn.execute("""
+            SELECT status, attempt_count
+            FROM stage_tasks
+            WHERE hearing_id = ? AND stage = ? AND publish_version = 1
+        """, ("h3", "govinfo")).fetchone()
+        assert row is not None
+        assert row["status"] == "running"
+        assert row["attempt_count"] == 2
