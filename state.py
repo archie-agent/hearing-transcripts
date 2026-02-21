@@ -141,6 +141,116 @@ class State:
             )
         """)
 
+        # Queue rollout scaffolding (north-star phases 1+)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS queue_run_audits (
+                run_id TEXT PRIMARY KEY,
+                role TEXT,
+                status TEXT,
+                args_json TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                hearings_discovered INTEGER DEFAULT 0,
+                hearings_processed INTEGER DEFAULT 0,
+                hearings_failed INTEGER DEFAULT 0,
+                error TEXT
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS discovery_jobs (
+                job_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                status TEXT,
+                payload_json TEXT,
+                attempt_count INTEGER DEFAULT 0,
+                max_attempts INTEGER DEFAULT 5,
+                available_at TEXT,
+                claimed_by TEXT,
+                lease_expires_at TEXT,
+                last_error TEXT,
+                enqueued_at TEXT,
+                started_at TEXT,
+                completed_at TEXT
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS hearing_jobs (
+                hearing_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                committee_key TEXT,
+                hearing_date TEXT,
+                title TEXT,
+                status TEXT,
+                attempt_count INTEGER DEFAULT 0,
+                max_attempts INTEGER DEFAULT 5,
+                available_at TEXT,
+                claimed_by TEXT,
+                lease_expires_at TEXT,
+                last_error TEXT,
+                enqueued_at TEXT,
+                started_at TEXT,
+                completed_at TEXT
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS stage_tasks (
+                task_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hearing_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                publish_version INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL,
+                attempt_count INTEGER DEFAULT 0,
+                max_attempts INTEGER DEFAULT 5,
+                available_at TEXT,
+                claimed_by TEXT,
+                lease_expires_at TEXT,
+                last_error TEXT,
+                payload_json TEXT,
+                enqueued_at TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                UNIQUE(hearing_id, stage, publish_version)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS delivery_outbox_items (
+                event_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                hearing_id TEXT,
+                publish_version INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                attempt_count INTEGER DEFAULT 0,
+                max_attempts INTEGER DEFAULT 5,
+                available_at TEXT,
+                claimed_by TEXT,
+                lease_expires_at TEXT,
+                last_error TEXT,
+                enqueued_at TEXT,
+                delivered_at TEXT
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dead_letter_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_type TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                stage TEXT,
+                payload_json TEXT,
+                error TEXT,
+                attempt_count INTEGER DEFAULT 0,
+                first_failed_at TEXT,
+                last_failed_at TEXT,
+                requeued_at TEXT,
+                resolved_at TEXT
+            )
+        """)
+
         # Migration: add congress_event_id for cross-run identity matching
         cursor = conn.execute("PRAGMA table_info(hearings)")
         existing_cols = {row["name"] for row in cursor.fetchall()}
@@ -149,6 +259,42 @@ class State:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_hearings_congress_event_id
             ON hearings(congress_event_id) WHERE congress_event_id IS NOT NULL
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_discovery_jobs_status_available
+            ON discovery_jobs(status, available_at)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_discovery_jobs_lease
+            ON discovery_jobs(lease_expires_at)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_hearing_jobs_status_available
+            ON hearing_jobs(status, available_at)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_hearing_jobs_lease
+            ON hearing_jobs(lease_expires_at)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_stage_tasks_status_available
+            ON stage_tasks(status, available_at)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_stage_tasks_lease
+            ON stage_tasks(lease_expires_at)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_outbox_status_available
+            ON delivery_outbox_items(status, available_at)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_outbox_lease
+            ON delivery_outbox_items(lease_expires_at)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dead_letter_lookup
+            ON dead_letter_items(item_type, item_key, stage)
         """)
 
         conn.commit()
@@ -381,6 +527,72 @@ class State:
             "whisper_usd": row["whisper_usd"] or 0.0,
             "total_usd": row["total_usd"] or 0.0,
         }
+
+    # ------------------------------------------------------------------
+    # Queue run audit tracking (phase 1 scaffolding)
+    # ------------------------------------------------------------------
+
+    def record_queue_run_start(self, run_id: str, role: str, args: dict) -> None:
+        """Insert or reset queue audit row for a run."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("""
+            INSERT INTO queue_run_audits
+                (run_id, role, status, args_json, started_at, completed_at,
+                 hearings_discovered, hearings_processed, hearings_failed, error)
+            VALUES (?, ?, ?, ?, ?, NULL, 0, 0, 0, NULL)
+            ON CONFLICT(run_id) DO UPDATE
+            SET role = excluded.role,
+                status = excluded.status,
+                args_json = excluded.args_json,
+                started_at = excluded.started_at,
+                completed_at = NULL,
+                hearings_discovered = 0,
+                hearings_processed = 0,
+                hearings_failed = 0,
+                error = NULL
+        """, (run_id, role, "running", json.dumps(args), now))
+        conn.commit()
+
+    def record_queue_run_finish(
+        self,
+        run_id: str,
+        status: str,
+        hearings_discovered: int,
+        hearings_processed: int,
+        hearings_failed: int,
+        error: str | None = None,
+    ) -> None:
+        """Finalize queue audit row for a run."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("""
+            UPDATE queue_run_audits
+            SET status = ?,
+                completed_at = ?,
+                hearings_discovered = ?,
+                hearings_processed = ?,
+                hearings_failed = ?,
+                error = ?
+            WHERE run_id = ?
+        """, (status, now, hearings_discovered, hearings_processed, hearings_failed, error, run_id))
+        conn.commit()
+
+    def get_queue_run(self, run_id: str) -> dict | None:
+        """Fetch a queue run audit row by run_id."""
+        conn = self._get_conn()
+        cursor = conn.execute(
+            "SELECT * FROM queue_run_audits WHERE run_id = ?",
+            (run_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        args_json = result.get("args_json")
+        if args_json:
+            result["args"] = json.loads(args_json)
+        return result
 
     def get_unprocessed_hearings(self) -> list[dict]:
         """Return hearings that haven't been fully processed."""

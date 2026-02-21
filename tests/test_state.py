@@ -299,3 +299,42 @@ class TestDigestTracking:
     def test_last_digest_date_empty(self, tmp_path):
         st = State(db_path=tmp_path / "test.db")
         assert st.last_digest_date() is None
+
+
+class TestQueueScaffolding:
+    def test_queue_tables_exist(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        conn = st._get_conn()
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+        names = {r["name"] for r in rows}
+        expected = {
+            "queue_run_audits",
+            "discovery_jobs",
+            "hearing_jobs",
+            "stage_tasks",
+            "delivery_outbox_items",
+            "dead_letter_items",
+        }
+        assert expected.issubset(names)
+
+    def test_queue_run_audit_lifecycle(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        run_id = "2026-02-21T120000"
+        st.record_queue_run_start(run_id, role="monolith", args={"days": 1})
+        st.record_queue_run_finish(
+            run_id,
+            status="completed",
+            hearings_discovered=7,
+            hearings_processed=3,
+            hearings_failed=1,
+        )
+        row = st.get_queue_run(run_id)
+        assert row is not None
+        assert row["status"] == "completed"
+        assert row["hearings_discovered"] == 7
+        assert row["hearings_processed"] == 3
+        assert row["hearings_failed"] == 1
+        assert row["role"] == "monolith"
+        assert row["args"]["days"] == 1
