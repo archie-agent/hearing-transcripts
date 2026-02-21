@@ -594,6 +594,11 @@ def main():
     parser.add_argument("--queue-health", action="store_true", help="Print queue/dead-letter health metrics and exit")
     parser.add_argument("--requeue-hearing-job", type=str, default=None, help="Move failed hearing job back to pending by hearing ID")
     parser.add_argument("--requeue-outbox-event", type=str, default=None, help="Move dead-letter outbox event back to pending by event ID")
+    parser.add_argument("--requeue-stage-task", type=str, default=None, help="Move dead-letter stage task back to pending (hearing_id:stage[:version])")
+    parser.add_argument("--list-dlq", action="store_true", help="List unresolved dead-letter items and exit")
+    parser.add_argument("--dlq-limit", type=int, default=100, help="Limit for --list-dlq (default: 100)")
+    parser.add_argument("--health-max-queue-age", type=int, default=None, help="Fail queue health check if any queue age exceeds this many seconds")
+    parser.add_argument("--health-max-dlq", type=int, default=None, help="Fail queue health check if dead-letter count exceeds this value")
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     args = parser.parse_args()
 
@@ -607,9 +612,11 @@ def main():
         args.queue_health,
         args.requeue_hearing_job,
         args.requeue_outbox_event,
+        args.requeue_stage_task,
+        args.list_dlq,
     ))
     if admin_ops > 1:
-        parser.error("choose only one of --queue-health, --requeue-hearing-job, --requeue-outbox-event")
+        parser.error("choose only one queue admin operation at a time")
     if admin_ops and (args.discover_only or args.enqueue_only or args.drain_only):
         parser.error("queue admin ops cannot be combined with discovery/queue run modes")
 
@@ -641,11 +648,21 @@ def main():
     max_cost = args.max_cost or config.MAX_COST_PER_RUN
     state = State()
     queue_write_enabled = config.QUEUE_WRITE_ENABLED
+    queue_role = "monolith"
+    if args.enqueue_only:
+        queue_role = "producer"
+    elif args.drain_only:
+        queue_role = "worker"
+    elif any((args.queue_health, args.requeue_hearing_job, args.requeue_outbox_event,
+              args.requeue_stage_task, args.list_dlq)):
+        queue_role = "ops"
     queue_status = "running"
     queue_discovered = 0
     queue_processed = 0
     queue_failed = 0
     queue_error: str | None = None
+    discovery_job_id: str | None = None
+    discovery_job_finished = False
     if (args.enqueue_only or args.drain_only) and not queue_write_enabled:
         log.error("Queue mode requires QUEUE_WRITE_ENABLED=1")
         sys.exit(1)
@@ -653,7 +670,7 @@ def main():
         log.error("Drain mode requires QUEUE_READ_ENABLED=1")
         sys.exit(1)
     if queue_write_enabled:
-        state.record_queue_run_start(run_id=run_id, role="monolith", args=vars(args))
+        state.record_queue_run_start(run_id=run_id, role=queue_role, args=vars(args))
 
     try:
         log.info(
@@ -662,8 +679,31 @@ def main():
         )
 
         if args.queue_health:
-            print(json.dumps(state.get_queue_health(), indent=2))
-            queue_status = "queue_health"
+            health = state.get_queue_health()
+            print(json.dumps(health, indent=2))
+            breaches: list[str] = []
+            if args.health_max_queue_age is not None:
+                for queue_name, age_seconds in health.get("max_queue_age_seconds", {}).items():
+                    if age_seconds is not None and age_seconds > args.health_max_queue_age:
+                        breaches.append(
+                            f"{queue_name} age {age_seconds}s > {args.health_max_queue_age}s"
+                        )
+            if args.health_max_dlq is not None:
+                dlq = int(health.get("dead_letter_count", 0))
+                if dlq > args.health_max_dlq:
+                    breaches.append(f"dead_letter_count {dlq} > {args.health_max_dlq}")
+            if breaches:
+                queue_status = "queue_health_failed"
+                queue_error = "; ".join(breaches)
+                log.error("Queue health breach: %s", queue_error)
+                sys.exit(2)
+            queue_status = "queue_health_ok"
+            return
+        if args.list_dlq:
+            rows = state.list_dead_letter_items(limit=max(args.dlq_limit, 1))
+            print(json.dumps(rows, indent=2))
+            queue_processed = len(rows)
+            queue_status = "list_dlq"
             return
         if args.requeue_hearing_job:
             changed = state.requeue_failed_hearing_job(args.requeue_hearing_job)
@@ -683,6 +723,35 @@ def main():
                 log.info("No dead-letter outbox event to requeue: %s", args.requeue_outbox_event)
                 queue_status = "requeue_outbox_event_noop"
             return
+        if args.requeue_stage_task:
+            parts = args.requeue_stage_task.split(":")
+            if len(parts) not in (2, 3):
+                raise ValueError("--requeue-stage-task format must be hearing_id:stage[:version]")
+            hearing_id = parts[0]
+            stage = parts[1]
+            publish_version = int(parts[2]) if len(parts) == 3 else 1
+            changed = state.requeue_stage_task(hearing_id, stage, publish_version=publish_version)
+            if changed:
+                log.info(
+                    "Requeued dead-letter stage task: %s:%s:v%d",
+                    hearing_id, stage, publish_version,
+                )
+                queue_status = "requeue_stage_task_done"
+            else:
+                log.info(
+                    "No dead-letter stage task to requeue: %s:%s:v%d",
+                    hearing_id, stage, publish_version,
+                )
+                queue_status = "requeue_stage_task_noop"
+            return
+
+        if args.enqueue_only:
+            discovery_job_id = f"discover:{run_id}"
+            state.start_discovery_job(
+                job_id=discovery_job_id,
+                run_id=run_id,
+                payload={"days": args.days, "tier": args.tier, "committee": args.committee},
+            )
 
         if args.drain_only:
             worker_id = args.worker_id or f"worker-{os.getpid()}"
@@ -813,6 +882,9 @@ def main():
 
         if not hearings:
             log.info("No new hearings found.")
+            if discovery_job_id and not discovery_job_finished:
+                state.finish_discovery_job(discovery_job_id, status="done")
+                discovery_job_finished = True
             queue_status = "noop_no_hearings"
             return
 
@@ -861,6 +933,9 @@ def main():
                 ):
                     queued += 1
             log.info("Enqueue mode: queued %d hearing job(s)", queued)
+            if discovery_job_id and not discovery_job_finished:
+                state.finish_discovery_job(discovery_job_id, status="done")
+                discovery_job_finished = True
             queue_processed = queued
             queue_failed = 0
             queue_status = "enqueue_only_completed"
@@ -1058,6 +1133,8 @@ def main():
     except Exception as e:
         queue_status = "failed"
         queue_error = str(e)
+        if discovery_job_id and not discovery_job_finished:
+            state.finish_discovery_job(discovery_job_id, status="failed", error=str(e))
         raise
     finally:
         if queue_write_enabled:

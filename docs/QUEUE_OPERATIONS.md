@@ -13,6 +13,12 @@ Print queue and dead-letter metrics:
 python run.py --queue-health
 ```
 
+Fail health checks on SLO-like thresholds:
+
+```bash
+python run.py --queue-health --health-max-queue-age 3600 --health-max-dlq 0
+```
+
 Expected keys:
 - `hearing_jobs`: counts by status
 - `outbox_items`: counts by status
@@ -68,6 +74,18 @@ Requeue a dead-letter outbox event:
 
 ```bash
 python run.py --requeue-outbox-event <event_id>
+```
+
+Requeue a dead-letter stage task:
+
+```bash
+python run.py --requeue-stage-task <hearing_id>:<stage>[:version]
+```
+
+List unresolved dead-letter items:
+
+```bash
+python run.py --list-dlq --dlq-limit 100
 ```
 
 ## Failure Injection Checks

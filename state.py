@@ -519,7 +519,47 @@ class State:
                     now, now, payload_json, error,
                 ))
 
+        # Terminal stage failures are surfaced in DLQ for explicit operator replay.
+        if status == "failed":
+            row = conn.execute("""
+                SELECT attempt_count, max_attempts
+                FROM stage_tasks
+                WHERE hearing_id = ? AND stage = ? AND publish_version = ?
+            """, (hearing_id, stage, publish_version)).fetchone()
+            if row is not None:
+                attempt_count = int(row["attempt_count"] or 0)
+                max_attempts = int(row["max_attempts"] or 5)
+                if attempt_count >= max_attempts:
+                    conn.execute("""
+                        UPDATE stage_tasks
+                        SET status = 'dead_letter'
+                        WHERE hearing_id = ? AND stage = ? AND publish_version = ?
+                    """, (hearing_id, stage, publish_version))
+                    self._upsert_dead_letter_item(
+                        conn=conn,
+                        item_type="stage_task",
+                        item_key=f"{hearing_id}:{stage}:v{publish_version}",
+                        stage=stage,
+                        error=error or "stage task failed",
+                        attempt_count=attempt_count,
+                        payload={
+                            "hearing_id": hearing_id,
+                            "stage": stage,
+                            "publish_version": publish_version,
+                        },
+                    )
+
         conn.commit()
+
+    def get_stage_task(self, hearing_id: str, stage: str, publish_version: int = 1) -> dict | None:
+        """Fetch a stage task row by key."""
+        conn = self._get_conn()
+        row = conn.execute("""
+            SELECT *
+            FROM stage_tasks
+            WHERE hearing_id = ? AND stage = ? AND publish_version = ?
+        """, (hearing_id, stage, publish_version)).fetchone()
+        return dict(row) if row else None
 
     def record_scraper_run(self, committee_key: str, source_type: str,
                           count: int, error: str | None = None) -> None:
@@ -637,6 +677,43 @@ class State:
                 hearings_failed = 0,
                 error = NULL
         """, (run_id, role, "running", json.dumps(args), now))
+        conn.commit()
+
+    def start_discovery_job(self, job_id: str, run_id: str, payload: dict | None = None) -> None:
+        """Record the start of a discovery producer job."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("""
+            INSERT INTO discovery_jobs
+                (job_id, run_id, status, payload_json, attempt_count, max_attempts,
+                 available_at, enqueued_at, started_at, completed_at, claimed_by,
+                 lease_expires_at, last_error)
+            VALUES (?, ?, 'running', ?, 1, 5, ?, ?, ?, NULL, NULL, NULL, NULL)
+            ON CONFLICT(job_id) DO UPDATE
+            SET run_id = excluded.run_id,
+                status = excluded.status,
+                payload_json = excluded.payload_json,
+                attempt_count = discovery_jobs.attempt_count + 1,
+                available_at = excluded.available_at,
+                started_at = excluded.started_at,
+                completed_at = NULL,
+                claimed_by = NULL,
+                lease_expires_at = NULL,
+                last_error = NULL
+        """, (job_id, run_id, json.dumps(payload or {}), now, now, now))
+        conn.commit()
+
+    def finish_discovery_job(self, job_id: str, status: str, error: str | None = None) -> None:
+        """Finalize a discovery producer job."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("""
+            UPDATE discovery_jobs
+            SET status = ?,
+                completed_at = ?,
+                last_error = ?
+            WHERE job_id = ?
+        """, (status, now, error, job_id))
         conn.commit()
 
     def record_queue_run_finish(
@@ -1106,6 +1183,58 @@ class State:
         conn.commit()
         return cursor.rowcount > 0
 
+    def requeue_stage_task(self, hearing_id: str, stage: str, publish_version: int = 1) -> bool:
+        """Move a dead-letter stage task back to pending for replay."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = conn.execute("""
+            UPDATE stage_tasks
+            SET status = 'pending',
+                available_at = ?,
+                completed_at = NULL,
+                last_error = NULL,
+                claimed_by = NULL,
+                lease_expires_at = NULL
+            WHERE hearing_id = ?
+              AND stage = ?
+              AND publish_version = ?
+              AND status = 'dead_letter'
+        """, (now, hearing_id, stage, publish_version))
+        if cursor.rowcount:
+            conn.execute("""
+                UPDATE dead_letter_items
+                SET requeued_at = ?, resolved_at = ?
+                WHERE item_type = 'stage_task'
+                  AND item_key = ?
+                  AND resolved_at IS NULL
+            """, (now, now, f"{hearing_id}:{stage}:v{publish_version}"))
+        conn.commit()
+        return cursor.rowcount > 0
+
+    def list_dead_letter_items(self, limit: int = 100, item_type: str | None = None) -> list[dict]:
+        """List unresolved dead-letter items for operator triage."""
+        conn = self._get_conn()
+        if item_type:
+            rows = conn.execute("""
+                SELECT item_type, item_key, stage, error, attempt_count,
+                       first_failed_at, last_failed_at, requeued_at, resolved_at
+                FROM dead_letter_items
+                WHERE resolved_at IS NULL
+                  AND item_type = ?
+                ORDER BY last_failed_at DESC
+                LIMIT ?
+            """, (item_type, limit)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT item_type, item_key, stage, error, attempt_count,
+                       first_failed_at, last_failed_at, requeued_at, resolved_at
+                FROM dead_letter_items
+                WHERE resolved_at IS NULL
+                ORDER BY last_failed_at DESC
+                LIMIT ?
+            """, (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
     def get_queue_health(self) -> dict:
         """Return queue/dead-letter metrics for operator health checks."""
         conn = self._get_conn()
@@ -1132,6 +1261,13 @@ class State:
             SELECT COUNT(*) AS n
             FROM delivery_outbox_items
             WHERE status = 'processing'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at < ?
+        """, (now,)).fetchone()["n"]
+        stale_stage_leases = conn.execute("""
+            SELECT COUNT(*) AS n
+            FROM stage_tasks
+            WHERE status = 'running'
               AND lease_expires_at IS NOT NULL
               AND lease_expires_at < ?
         """, (now,)).fetchone()["n"]
@@ -1164,6 +1300,11 @@ class State:
             FROM delivery_outbox_items
             WHERE status = 'pending'
         """).fetchone()["oldest"]
+        oldest_stage = conn.execute("""
+            SELECT MIN(enqueued_at) AS oldest
+            FROM stage_tasks
+            WHERE status = 'pending'
+        """).fetchone()["oldest"]
 
         def _age_seconds(oldest_ts: str | None) -> int | None:
             if not oldest_ts:
@@ -1171,13 +1312,9 @@ class State:
             oldest_dt = _ensure_utc(datetime.fromisoformat(oldest_ts))
             return int((datetime.now(timezone.utc) - oldest_dt).total_seconds())
 
-        dlq_total = (
-            hearing_counts.get("failed", 0)
-            + outbox_counts.get("dead_letter", 0)
-            + conn.execute(
-                "SELECT COUNT(*) AS n FROM dead_letter_items WHERE resolved_at IS NULL"
-            ).fetchone()["n"]
-        )
+        dlq_total = conn.execute(
+            "SELECT COUNT(*) AS n FROM dead_letter_items WHERE resolved_at IS NULL"
+        ).fetchone()["n"]
 
         return {
             "hearing_jobs": hearing_counts,
@@ -1186,10 +1323,12 @@ class State:
             "stale_leases": {
                 "hearing_jobs": stale_hearing_leases,
                 "outbox_items": stale_outbox_leases,
+                "stage_tasks": stale_stage_leases,
             },
             "max_queue_age_seconds": {
                 "hearing_jobs": _age_seconds(oldest_hearing),
                 "outbox_items": _age_seconds(oldest_outbox),
+                "stage_tasks": _age_seconds(oldest_stage),
             },
             "retry_histogram": {
                 "hearing_jobs": hearing_retry_histogram,

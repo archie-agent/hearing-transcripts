@@ -387,6 +387,53 @@ class TestQueueScaffolding:
         assert row["status"] == "running"
         assert row["attempt_count"] == 2
 
+    def test_mark_stage_task_hits_dead_letter_at_max_attempts(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.mark_stage_task("h4", "cspan", "running")
+        st._get_conn().execute(
+            "UPDATE stage_tasks SET max_attempts = 1 WHERE hearing_id = ? AND stage = ?",
+            ("h4", "cspan"),
+        )
+        st._get_conn().commit()
+        st.mark_stage_task("h4", "cspan", "failed", error="permanent failure")
+
+        row = st.get_stage_task("h4", "cspan")
+        assert row is not None
+        assert row["status"] == "dead_letter"
+
+        dlq = st.list_dead_letter_items(item_type="stage_task")
+        assert len(dlq) == 1
+        assert dlq[0]["item_key"] == "h4:cspan:v1"
+        assert dlq[0]["error"] == "permanent failure"
+
+    def test_requeue_stage_task_from_dead_letter(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.mark_stage_task("h5", "publish", "running")
+        st._get_conn().execute(
+            "UPDATE stage_tasks SET max_attempts = 1 WHERE hearing_id = ? AND stage = ?",
+            ("h5", "publish"),
+        )
+        st._get_conn().commit()
+        st.mark_stage_task("h5", "publish", "failed", error="broken publish")
+        changed = st.requeue_stage_task("h5", "publish", publish_version=1)
+        assert changed is True
+        row = st.get_stage_task("h5", "publish", publish_version=1)
+        assert row is not None
+        assert row["status"] == "pending"
+
+    def test_discovery_job_lifecycle(self, tmp_path):
+        st = State(db_path=tmp_path / "test.db")
+        st.start_discovery_job("discover:run-1", run_id="run-1", payload={"days": 3})
+        st.finish_discovery_job("discover:run-1", status="done")
+        row = st._get_conn().execute(
+            "SELECT status, payload_json, completed_at FROM discovery_jobs WHERE job_id = ?",
+            ("discover:run-1",),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "done"
+        assert row["completed_at"] is not None
+        assert "days" in row["payload_json"]
+
 
 class TestHearingJobQueue:
     def test_enqueue_and_claim_and_complete(self, tmp_path):
@@ -632,3 +679,5 @@ class TestQueueHealth:
         assert "max_queue_age_seconds" in health
         assert "retry_histogram" in health
         assert "dead_letter_count" in health
+        assert "stage_tasks" in health["stale_leases"]
+        assert "stage_tasks" in health["max_queue_age_seconds"]
