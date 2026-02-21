@@ -27,16 +27,23 @@ cd "$PROJECT_DIR"
 LOG_FILE="$LOG_DIR/$(date +%Y-%m-%d).log"
 
 if [[ "${QUEUE_READ_ENABLED:-0}" == "1" ]]; then
-    # Producer/worker topology (north-star cutover path)
-    python3 run.py --enqueue-only --days 3 --workers 1 2>&1 | tee "$LOG_FILE"
-    RC_ENQUEUE="${PIPESTATUS[0]}"
-    if [[ "$RC_ENQUEUE" -ne 0 ]]; then
-        RC="$RC_ENQUEUE"
+    # Producer/worker topology (durable discovery -> stage workers)
+    python3 run.py --enqueue-discovery --days 3 --workers 1 2>&1 | tee "$LOG_FILE"
+    RC_ENQUEUE_DISCOVERY="${PIPESTATUS[0]}"
+    if [[ "$RC_ENQUEUE_DISCOVERY" -ne 0 ]]; then
+        RC="$RC_ENQUEUE_DISCOVERY"
     else
-        DRAIN_MAX_TASKS="${DRAIN_MAX_TASKS:-60}"
         LEASE_SECONDS="${LEASE_SECONDS:-900}"
-        python3 run.py --drain-only --workers 1 --max-tasks "$DRAIN_MAX_TASKS" --lease-seconds "$LEASE_SECONDS" 2>&1 | tee -a "$LOG_FILE"
-        RC="${PIPESTATUS[0]}"
+        DISCOVERY_MAX_TASKS="${DISCOVERY_MAX_TASKS:-10}"
+        python3 run.py --drain-discovery --workers 1 --max-tasks "$DISCOVERY_MAX_TASKS" --lease-seconds "$LEASE_SECONDS" 2>&1 | tee -a "$LOG_FILE"
+        RC_DRAIN_DISCOVERY="${PIPESTATUS[0]}"
+        if [[ "$RC_DRAIN_DISCOVERY" -ne 0 ]]; then
+            RC="$RC_DRAIN_DISCOVERY"
+        else
+            DRAIN_MAX_TASKS="${DRAIN_MAX_TASKS:-60}"
+            python3 run.py --drain-only --workers 1 --max-tasks "$DRAIN_MAX_TASKS" --lease-seconds "$LEASE_SECONDS" 2>&1 | tee -a "$LOG_FILE"
+            RC="${PIPESTATUS[0]}"
+        fi
     fi
 else
     # Monolith fallback (rollback-safe default)

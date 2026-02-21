@@ -760,6 +760,64 @@ def _update_index(results: list[dict]) -> None:
     log.info("Index updated: %s (%d hearings)", index_path, len(existing["hearings"]))
 
 
+def _resolve_active_committees(committee: str | None, tier: int | None) -> dict[str, dict]:
+    """Resolve committee scope from explicit committee or tier filter."""
+    if committee:
+        all_committees = config.get_all_committees()
+        if committee not in all_committees:
+            raise ValueError(f"Unknown committee: {committee}")
+        return {committee: all_committees[committee]}
+    if tier is not None:
+        return config.get_committees(max_tier=tier)
+    return config.get_committees(max_tier=2)
+
+
+def _filter_new_hearings(hearings: list[Hearing], state: State, reprocess: bool) -> list[Hearing]:
+    """Filter discovered hearings to work that should be (re)processed."""
+    if reprocess:
+        return hearings
+
+    new_hearings: list[Hearing] = []
+    for h in hearings:
+        if not state.is_processed(h.id):
+            new_hearings.append(h)
+        elif h.sources.get("cspan_url") and not state.is_step_done(h.id, "cspan_fetched"):
+            # Re-process hearings that gained a C-SPAN URL since last run.
+            new_hearings.append(h)
+            log.debug("Re-processing %s: new C-SPAN URL", h.id)
+        elif h.sources.get("isvp_comm") and not state.is_step_done(h.id, "isvp_fetched"):
+            # Re-process hearings that gained ISVP params since last run.
+            new_hearings.append(h)
+            log.debug("Re-processing %s: new ISVP params", h.id)
+    return new_hearings
+
+
+def _enqueue_initial_stage_tasks(
+    hearings: list[Hearing],
+    state: State,
+    run_id: str,
+    queued_by: str,
+) -> int:
+    """Persist discovered hearings and enqueue the initial runnable stage."""
+    queued = 0
+    for h in hearings:
+        state.record_hearing(
+            h.id, h.committee_key, h.date,
+            h.title, h.slug, h.sources,
+        )
+        state.mark_step(h.id, "discover", "done")
+        initial_stage = _initial_stage_for_hearing(h, state)
+        if initial_stage and _schedule_stage_task(
+            state=state,
+            hearing_id=h.id,
+            stage=initial_stage,
+            publish_version=1,
+            payload={"run_id": run_id, "queued_by": queued_by},
+        ):
+            queued += 1
+    return queued
+
+
 def main():
     parser = argparse.ArgumentParser(description="Congressional hearing transcript pipeline")
     parser.add_argument("--days", type=int, default=1, help="Days to look back (default: 1)")
@@ -769,9 +827,11 @@ def main():
     parser.add_argument("--max-cost", type=float, default=None, help="Max LLM cost per run in USD")
     parser.add_argument("--workers", type=int, default=3, help="Parallel hearing processing workers")
     parser.add_argument("--reprocess", action="store_true", help="Re-process already processed hearings")
+    parser.add_argument("--enqueue-discovery", action="store_true", help="Enqueue one durable discovery job and exit")
+    parser.add_argument("--drain-discovery", action="store_true", help="Claim and process durable discovery jobs")
     parser.add_argument("--enqueue-only", action="store_true", help="Discover hearings and enqueue initial stage tasks only")
     parser.add_argument("--drain-only", action="store_true", help="Drain queued stage tasks without running discovery")
-    parser.add_argument("--worker-id", type=str, default=None, help="Worker identity when using --drain-only")
+    parser.add_argument("--worker-id", type=str, default=None, help="Worker identity when using --drain-only or --drain-discovery")
     parser.add_argument("--max-tasks", type=int, default=20, help="Max queued stage tasks to claim in one drain run")
     parser.add_argument("--lease-seconds", type=int, default=900, help="Lease duration for claimed stage tasks")
     parser.add_argument("--queue-health", action="store_true", help="Print queue/dead-letter health metrics and exit")
@@ -785,12 +845,18 @@ def main():
     parser.add_argument("--verbose", "-v", action="store_true", help="Debug logging")
     args = parser.parse_args()
 
-    if args.enqueue_only and args.drain_only:
-        parser.error("--enqueue-only and --drain-only are mutually exclusive")
-    if args.discover_only and args.drain_only:
-        parser.error("--discover-only cannot be combined with --drain-only")
-    if args.discover_only and args.enqueue_only:
-        parser.error("--discover-only cannot be combined with --enqueue-only")
+    run_modes = (
+        args.discover_only,
+        args.enqueue_discovery,
+        args.drain_discovery,
+        args.enqueue_only,
+        args.drain_only,
+    )
+    if sum(bool(v) for v in run_modes) > 1:
+        parser.error(
+            "--discover-only, --enqueue-discovery, --drain-discovery, "
+            "--enqueue-only, and --drain-only are mutually exclusive",
+        )
     admin_ops = sum(bool(v) for v in (
         args.queue_health,
         args.requeue_hearing_job,
@@ -800,7 +866,7 @@ def main():
     ))
     if admin_ops > 1:
         parser.error("choose only one queue admin operation at a time")
-    if admin_ops and (args.discover_only or args.enqueue_only or args.drain_only):
+    if admin_ops and any(run_modes):
         parser.error("queue admin ops cannot be combined with discovery/queue run modes")
 
     logging.basicConfig(
@@ -816,26 +882,25 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Filter committees
-    if args.committee:
-        all_committees = config.get_all_committees()
-        if args.committee not in all_committees:
-            log.error("Unknown committee: %s", args.committee)
-            log.info("Available: %s", ", ".join(sorted(all_committees.keys())))
-            sys.exit(1)
-        active = {args.committee: all_committees[args.committee]}
-    elif args.tier:
-        active = config.get_committees(max_tier=args.tier)
-    else:
-        active = config.get_committees(max_tier=2)
+    try:
+        active = _resolve_active_committees(args.committee, args.tier)
+    except ValueError as e:
+        log.error(str(e))
+        log.info("Available: %s", ", ".join(sorted(config.get_all_committees().keys())))
+        sys.exit(1)
 
     max_cost = args.max_cost or config.MAX_COST_PER_RUN
     state = State()
     queue_write_enabled = config.QUEUE_WRITE_ENABLED
     queue_role = "monolith"
-    if args.enqueue_only:
-        queue_role = "producer"
+    if args.enqueue_discovery:
+        queue_role = "producer_enqueue"
+    elif args.drain_discovery:
+        queue_role = "producer_drain"
+    elif args.enqueue_only:
+        queue_role = "producer_legacy"
     elif args.drain_only:
-        queue_role = "worker"
+        queue_role = "stage_worker"
     elif any((args.queue_health, args.requeue_hearing_job, args.requeue_outbox_event,
               args.requeue_stage_task, args.list_dlq)):
         queue_role = "ops"
@@ -844,13 +909,11 @@ def main():
     queue_processed = 0
     queue_failed = 0
     queue_error: str | None = None
-    discovery_job_id: str | None = None
-    discovery_job_finished = False
-    if (args.enqueue_only or args.drain_only) and not queue_write_enabled:
+    if any((args.enqueue_discovery, args.drain_discovery, args.enqueue_only, args.drain_only)) and not queue_write_enabled:
         log.error("Queue mode requires QUEUE_WRITE_ENABLED=1")
         sys.exit(1)
-    if args.drain_only and not config.QUEUE_READ_ENABLED:
-        log.error("Drain mode requires QUEUE_READ_ENABLED=1")
+    if (args.drain_discovery or args.drain_only) and not config.QUEUE_READ_ENABLED:
+        log.error("Drain modes require QUEUE_READ_ENABLED=1")
         sys.exit(1)
     if queue_write_enabled:
         state.record_queue_run_start(run_id=run_id, role=queue_role, args=vars(args))
@@ -928,13 +991,90 @@ def main():
                 queue_status = "requeue_stage_task_noop"
             return
 
-        if args.enqueue_only:
-            discovery_job_id = f"discover:{run_id}"
-            state.start_discovery_job(
-                job_id=discovery_job_id,
+        if args.enqueue_discovery:
+            job_id = f"discover:{run_id}"
+            queued = state.enqueue_discovery_job(
+                job_id=job_id,
                 run_id=run_id,
-                payload={"days": args.days, "tier": args.tier, "committee": args.committee},
+                payload={
+                    "days": args.days,
+                    "tier": args.tier,
+                    "committee": args.committee,
+                    "reprocess": args.reprocess,
+                },
             )
+            if queued:
+                log.info("Enqueued discovery job: %s", job_id)
+                queue_processed = 1
+                queue_status = "enqueue_discovery_done"
+            else:
+                log.info("Discovery job already exists: %s", job_id)
+                queue_status = "enqueue_discovery_noop"
+            return
+
+        if args.drain_discovery:
+            worker_id = args.worker_id or f"producer-{os.getpid()}"
+            claimed_jobs = state.claim_discovery_jobs(
+                worker_id=worker_id,
+                limit=max(args.max_tasks, 1),
+                lease_seconds=max(args.lease_seconds, 30),
+            )
+            if not claimed_jobs:
+                log.info("Drain discovery mode: no pending discovery jobs to claim.")
+                queue_status = "drain_discovery_no_jobs"
+                return
+
+            log.info(
+                "Drain discovery mode: claimed %d discovery job(s) as %s",
+                len(claimed_jobs), worker_id,
+            )
+            total_hearings_discovered = 0
+            total_stage_tasks_queued = 0
+            errors: list[dict] = []
+
+            for i, job in enumerate(claimed_jobs, 1):
+                job_id = job["job_id"]
+                payload = job.get("payload") or {}
+                job_days = int(payload.get("days", args.days))
+                tier_value = payload.get("tier", args.tier)
+                job_tier = int(tier_value) if tier_value is not None else None
+                job_committee = payload.get("committee", args.committee)
+                job_reprocess = bool(payload.get("reprocess", args.reprocess))
+                log.info(
+                    "--- [%d/%d] Draining discovery job %s (days=%s tier=%s committee=%s) ---",
+                    i, len(claimed_jobs), job_id, job_days, job_tier, job_committee,
+                )
+                try:
+                    active_for_job = _resolve_active_committees(job_committee, job_tier)
+                    hearings = discover_all(days=job_days, committees=active_for_job, state=state)
+                    total_hearings_discovered += len(hearings)
+
+                    for h in hearings:
+                        _reconcile_hearing_id(h, state)
+
+                    new_hearings = _filter_new_hearings(hearings, state=state, reprocess=job_reprocess)
+                    queued = _enqueue_initial_stage_tasks(
+                        hearings=new_hearings,
+                        state=state,
+                        run_id=run_id,
+                        queued_by="drain_discovery",
+                    )
+                    total_stage_tasks_queued += queued
+                    state.finish_discovery_job(job_id, status="done")
+                    log.info(
+                        "Discovery job %s: discovered=%d new=%d stage_tasks_queued=%d",
+                        job_id, len(hearings), len(new_hearings), queued,
+                    )
+                except Exception as e:
+                    errors.append({"job_id": job_id, "error": str(e)})
+                    state.fail_discovery_job(job_id, str(e))
+                    log.error("FAILED discovery job %s: %s", job_id, e, exc_info=True)
+
+            queue_discovered = total_hearings_discovered
+            queue_processed = total_stage_tasks_queued
+            queue_failed = len(errors)
+            queue_status = "drain_discovery_completed" if not errors else "drain_discovery_partial"
+            return
 
         if args.drain_only:
             worker_id = args.worker_id or f"worker-{os.getpid()}"
@@ -1112,9 +1252,6 @@ def main():
 
         if not hearings:
             log.info("No new hearings found.")
-            if discovery_job_id and not discovery_job_finished:
-                state.finish_discovery_job(discovery_job_id, status="done")
-                discovery_job_finished = True
             queue_status = "noop_no_hearings"
             return
 
@@ -1125,21 +1262,7 @@ def main():
             _reconcile_hearing_id(h, state)
 
         # Filter out already-processed hearings (unless --reprocess)
-        if args.reprocess:
-            new_hearings = hearings
-        else:
-            new_hearings = []
-            for h in hearings:
-                if not state.is_processed(h.id):
-                    new_hearings.append(h)
-                elif h.sources.get("cspan_url") and not state.is_step_done(h.id, "cspan_fetched"):
-                    # Re-process hearings that gained a C-SPAN URL since last run
-                    new_hearings.append(h)
-                    log.debug("Re-processing %s: new C-SPAN URL", h.id)
-                elif h.sources.get("isvp_comm") and not state.is_step_done(h.id, "isvp_fetched"):
-                    # Re-process hearings that gained ISVP params since last run
-                    new_hearings.append(h)
-                    log.debug("Re-processing %s: new ISVP params", h.id)
+        new_hearings = _filter_new_hearings(hearings, state=state, reprocess=args.reprocess)
 
         log.info("Found %d hearings (%d new):", len(hearings), len(new_hearings))
         for h in hearings:
@@ -1147,26 +1270,13 @@ def main():
             log.info("  %s [%s] %s: %s", marker, h.date, h.committee_name, h.title[:80])
 
         if args.enqueue_only:
-            queued = 0
-            for h in new_hearings:
-                state.record_hearing(
-                    h.id, h.committee_key, h.date,
-                    h.title, h.slug, h.sources,
-                )
-                state.mark_step(h.id, "discover", "done")
-                initial_stage = _initial_stage_for_hearing(h, state)
-                if initial_stage and _schedule_stage_task(
-                    state=state,
-                    hearing_id=h.id,
-                    stage=initial_stage,
-                    publish_version=1,
-                    payload={"run_id": run_id, "queued_by": "enqueue_only"},
-                ):
-                    queued += 1
+            queued = _enqueue_initial_stage_tasks(
+                hearings=new_hearings,
+                state=state,
+                run_id=run_id,
+                queued_by="enqueue_only",
+            )
             log.info("Enqueue mode: queued %d stage task(s)", queued)
-            if discovery_job_id and not discovery_job_finished:
-                state.finish_discovery_job(discovery_job_id, status="done")
-                discovery_job_finished = True
             queue_processed = queued
             queue_failed = 0
             queue_status = "enqueue_only_completed"
@@ -1364,8 +1474,6 @@ def main():
     except Exception as e:
         queue_status = "failed"
         queue_error = str(e)
-        if discovery_job_id and not discovery_job_finished:
-            state.finish_discovery_job(discovery_job_id, status="failed", error=str(e))
         raise
     finally:
         if queue_write_enabled:

@@ -30,13 +30,25 @@ Expected keys:
 
 ## Producer/Worker Modes
 
-Enqueue only (discovery + queue writes, no processing):
+Enqueue one durable discovery job:
+
+```bash
+python run.py --enqueue-discovery --days 3
+```
+
+Drain discovery jobs (claims discovery leases, discovers hearings, enqueues initial stage tasks):
+
+```bash
+python run.py --drain-discovery --max-tasks 10 --lease-seconds 900
+```
+
+Legacy producer mode (direct discovery + enqueue in one process):
 
 ```bash
 python run.py --enqueue-only --days 3 --workers 1
 ```
 
-Drain only (claim leased hearing jobs and process):
+Drain stage workers (claim leased stage tasks and process one stage per claim):
 
 ```bash
 python run.py --drain-only --workers 1 --max-tasks 20 --lease-seconds 900
